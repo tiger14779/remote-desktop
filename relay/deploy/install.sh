@@ -89,21 +89,39 @@ mkdir -p "$INSTALL_DIR"
 install -m 755 -o relay -g relay build/relay-linux        "$INSTALL_DIR/relay"
 install -m 644 -o relay -g relay config.example.json      "$INSTALL_DIR/config.example.json"
 
-# ---- First-install config: random tokens, no manual editing required ------
-# Operator can always edit later to add more devices / users; we only seed a
-# single (device-001, admin) pair so the relay is immediately usable.
+# ---- First-install config -------------------------------------------------
+# Resolution order:
+#   1. $SCRIPT_DIR/config.production.json     — operator-frozen, committed to
+#                                                the (private) repo so every
+#                                                server ends up identical.
+#                                                THIS IS THE NORMAL PATH FOR
+#                                                CUSTOMER-FACING DEPLOYMENTS.
+#   2. random tokens via openssl              — convenience for dev/test.
+#
+# Either way, an existing $INSTALL_DIR/config.json is preserved across reruns
+# (upgrade-safe). To force-replace it with the production config after a
+# token rotation: `sudo rm $INSTALL_DIR/config.json && bash install.sh`.
 fresh_config=false
+used_production_config=false
 DEVICE_TOKEN=""
 SESSION_TOKEN=""
 
 if [ ! -f "$INSTALL_DIR/config.json" ]; then
-    if ! command -v openssl >/dev/null 2>&1; then
-        apt-get install -y --no-install-recommends openssl
-    fi
-    DEVICE_TOKEN="$(openssl rand -hex 24)"
-    SESSION_TOKEN="$(openssl rand -hex 24)"
+    if [ -f "$SCRIPT_DIR/config.production.json" ]; then
+        echo "==> Using committed production config (deploy/config.production.json)"
+        install -m 600 -o relay -g relay \
+            "$SCRIPT_DIR/config.production.json" "$INSTALL_DIR/config.json"
+        used_production_config=true
+        fresh_config=true
+    else
+        echo "==> No production config found — generating random tokens"
+        if ! command -v openssl >/dev/null 2>&1; then
+            apt-get install -y --no-install-recommends openssl
+        fi
+        DEVICE_TOKEN="$(openssl rand -hex 24)"
+        SESSION_TOKEN="$(openssl rand -hex 24)"
 
-    cat > "$INSTALL_DIR/config.json" <<EOF
+        cat > "$INSTALL_DIR/config.json" <<EOF
 {
   "devices": {
     "device-001": "$DEVICE_TOKEN"
@@ -116,9 +134,10 @@ if [ ! -f "$INSTALL_DIR/config.json" ]; then
   }
 }
 EOF
-    chown relay:relay "$INSTALL_DIR/config.json"
-    chmod 600 "$INSTALL_DIR/config.json"
-    fresh_config=true
+        chown relay:relay "$INSTALL_DIR/config.json"
+        chmod 600 "$INSTALL_DIR/config.json"
+        fresh_config=true
+    fi
 fi
 
 # ---- systemd unit ---------------------------------------------------------
@@ -152,7 +171,37 @@ if $fresh_config; then
     [ -z "$SERVER_IP" ] && SERVER_IP="<YOUR-SERVER-IP>"
     PORT="${LISTEN_ADDR#:}"
 
-    cat <<EOF
+    if $used_production_config; then
+        cat <<EOF
+
+================================================================================
+  Production config installed from deploy/config.production.json
+================================================================================
+
+  Relay endpoint:        $SERVER_IP:$PORT
+  Live config on disk:   $INSTALL_DIR/config.json
+  Source of truth:       $SCRIPT_DIR/config.production.json (commit to repo)
+
+  Current devices / users:
+$(sudo -u relay grep -E '^\s*"(devices|users|device-|allowed_devices|session_token)' "$INSTALL_DIR/config.json" 2>/dev/null | sed 's/^/      /')
+
+  Customer-side commands stay the same on every server — the tokens live in
+  config.production.json. Distribute agent.exe / viewer.exe with whichever
+  device_id + token pair matches your customer.
+
+  To rotate tokens:
+      1. Edit relay/deploy/config.production.json, commit, push
+      2. On each server:
+           cd ~/remote-desktop && git pull
+           sudo rm $INSTALL_DIR/config.json
+           sudo bash relay/deploy/install.sh
+
+  Open the relay port on your firewall (if ufw is on):
+      sudo ufw allow $PORT/tcp
+================================================================================
+EOF
+    else
+        cat <<EOF
 
 ================================================================================
   Auto-generated credentials (also stored in $INSTALL_DIR/config.json):
@@ -173,13 +222,18 @@ if $fresh_config; then
       -session-token $SESSION_TOKEN ^
       -device-id device-001
 
+  These tokens are random and unique to this server. To get the same tokens
+  on every server (so customer-side binaries stay portable), drop a
+  pre-filled relay/deploy/config.production.json into the repo — the next
+  install will use it.
+
   To add more devices/users:
       sudo -u relay nano $INSTALL_DIR/config.json
       sudo systemctl restart $SERVICE_NAME
 
   Open the relay port on your firewall (if ufw is on):
       sudo ufw allow $PORT/tcp
-  Don't forget the cloud-provider security group too if you're on a VPS.
 ================================================================================
 EOF
+    fi
 fi

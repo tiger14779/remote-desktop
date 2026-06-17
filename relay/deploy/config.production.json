@@ -1,0 +1,14 @@
+{
+  "_comment": "Production config — committed to the repo on purpose so any relay install (this server, a backup server, a fresh box) ends up with the same tokens, and customer-side agent.exe binaries keep working. Tokens here are the source of truth for prod. Edit + commit + redeploy to rotate.",
+  "_security_note": "This file contains real credentials. The repo MUST stay private. To rotate tokens: edit this file -> commit -> on each server: sudo rm /opt/remote-desktop-relay/config.json && sudo bash deploy/install.sh.",
+
+  "devices": {
+    "device-001": "7f4ed9297289909c86fd83155e9ca992590898b962d3b6b0"
+  },
+  "users": {
+    "admin": {
+      "session_token": "e009aed4ad56e47950d6c9c7d8b81eac40105b4d5d2b3938",
+      "allowed_devices": ["device-001"]
+    }
+  }
+}
