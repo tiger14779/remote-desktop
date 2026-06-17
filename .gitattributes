@@ -1,0 +1,30 @@
+# Default: let git auto-detect text vs binary and normalise to LF in repo.
+* text=auto
+
+# Force LF on files that must keep Unix line endings, no matter where they are
+# checked out — deploy.sh runs in bash (Git Bash on Windows, or directly on the
+# Linux target), and bash chokes on \r at end of `set -euo pipefail` etc.
+*.sh        text eol=lf
+*.service   text eol=lf
+Makefile    text eol=lf
+
+# Windows-only scripts: keep CRLF so cmd.exe parses `(` ... `)` blocks correctly.
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+
+# Binary types — never touch.
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.bmp       binary
+*.ico       binary
+*.zip       binary
+*.tar       binary
+*.gz        binary
+*.7z        binary
+*.exe       binary
+*.dll       binary
+*.lib       binary
+*.pdb       binary
+*.h264      binary
