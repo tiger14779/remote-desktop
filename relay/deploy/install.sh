@@ -89,13 +89,36 @@ mkdir -p "$INSTALL_DIR"
 install -m 755 -o relay -g relay build/relay-linux        "$INSTALL_DIR/relay"
 install -m 644 -o relay -g relay config.example.json      "$INSTALL_DIR/config.example.json"
 
+# ---- First-install config: random tokens, no manual editing required ------
+# Operator can always edit later to add more devices / users; we only seed a
+# single (device-001, admin) pair so the relay is immediately usable.
+fresh_config=false
+DEVICE_TOKEN=""
+SESSION_TOKEN=""
+
 if [ ! -f "$INSTALL_DIR/config.json" ]; then
-    cp config.example.json "$INSTALL_DIR/config.json"
+    if ! command -v openssl >/dev/null 2>&1; then
+        apt-get install -y --no-install-recommends openssl
+    fi
+    DEVICE_TOKEN="$(openssl rand -hex 24)"
+    SESSION_TOKEN="$(openssl rand -hex 24)"
+
+    cat > "$INSTALL_DIR/config.json" <<EOF
+{
+  "devices": {
+    "device-001": "$DEVICE_TOKEN"
+  },
+  "users": {
+    "admin": {
+      "session_token": "$SESSION_TOKEN",
+      "allowed_devices": ["device-001"]
+    }
+  }
+}
+EOF
     chown relay:relay "$INSTALL_DIR/config.json"
     chmod 600 "$INSTALL_DIR/config.json"
     fresh_config=true
-else
-    fresh_config=false
 fi
 
 # ---- systemd unit ---------------------------------------------------------
@@ -119,16 +142,44 @@ echo "    Logs:           journalctl -u $SERVICE_NAME -f"
 echo "    Status:         systemctl status $SERVICE_NAME"
 
 if $fresh_config; then
+    # Best-effort: figure out the address clients should dial. Public IP first,
+    # falling back to the primary local address if no internet access.
+    SERVER_IP=""
+    if command -v curl >/dev/null 2>&1; then
+        SERVER_IP="$(curl -fsS --max-time 3 https://api.ipify.org 2>/dev/null || true)"
+    fi
+    [ -z "$SERVER_IP" ] && SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    [ -z "$SERVER_IP" ] && SERVER_IP="<YOUR-SERVER-IP>"
+    PORT="${LISTEN_ADDR#:}"
+
     cat <<EOF
 
-    ┌──────────────────────────────────────────────────────────────────────┐
-    │ FIRST INSTALL — edit the tokens in config.json BEFORE going public:  │
-    │                                                                      │
-    │   sudo -u relay nano $INSTALL_DIR/config.json                        │
-    │   sudo systemctl restart $SERVICE_NAME                               │
-    │                                                                      │
-    │ Open the relay port on your firewall too:                           │
-    │   sudo ufw allow ${LISTEN_ADDR#:}/tcp     (if ufw is in use)        │
-    └──────────────────────────────────────────────────────────────────────┘
+================================================================================
+  Auto-generated credentials (also stored in $INSTALL_DIR/config.json):
+================================================================================
+
+  Relay endpoint:    $SERVER_IP:$PORT
+
+  --- On the controlled Windows machine (agent) ---
+  agent.exe ^
+      -relay $SERVER_IP:$PORT ^
+      -device-id device-001 ^
+      -device-token $DEVICE_TOKEN
+
+  --- On the management Windows machine (viewer) ---
+  viewer.exe ^
+      -relay $SERVER_IP:$PORT ^
+      -account admin ^
+      -session-token $SESSION_TOKEN ^
+      -device-id device-001
+
+  To add more devices/users:
+      sudo -u relay nano $INSTALL_DIR/config.json
+      sudo systemctl restart $SERVICE_NAME
+
+  Open the relay port on your firewall (if ufw is on):
+      sudo ufw allow $PORT/tcp
+  Don't forget the cloud-provider security group too if you're on a VPS.
+================================================================================
 EOF
 fi
