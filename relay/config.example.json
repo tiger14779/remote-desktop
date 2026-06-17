@@ -1,0 +1,16 @@
+{
+  "devices": {
+    "device-001": "agent-token-001",
+    "device-002": "agent-token-002"
+  },
+  "users": {
+    "alice": {
+      "session_token": "viewer-token-alice",
+      "allowed_devices": ["device-001", "device-002"]
+    },
+    "bob": {
+      "session_token": "viewer-token-bob",
+      "allowed_devices": ["device-001"]
+    }
+  }
+}

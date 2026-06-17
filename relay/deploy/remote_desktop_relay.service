@@ -1,0 +1,42 @@
+[Unit]
+Description=Remote Desktop Relay
+Documentation=https://github.com/tiger14779/remote-desktop
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=relay
+Group=relay
+WorkingDirectory=/opt/remote-desktop-relay
+ExecStart=/opt/remote-desktop-relay/relay \
+    -listen :7100 \
+    -config /opt/remote-desktop-relay/config.json
+Restart=always
+RestartSec=5
+
+# Logging — everything goes to journald, view with `journalctl -u remote-desktop-relay`
+StandardOutput=journal
+StandardError=journal
+
+# Hardening (relay is read-only at runtime — it loads config.json on start and never writes to disk)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+# Resource hints — adjust for your load. Default fits ~dozens of devices.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

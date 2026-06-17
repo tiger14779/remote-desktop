@@ -1,0 +1,7 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "remote-desktop-agent",
+  "version": "0.1.0",
+  "description": "Agent (controlled-side) for the self-hosted remote desktop platform.",
+  "dependencies": []
+}

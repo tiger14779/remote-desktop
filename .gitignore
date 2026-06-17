@@ -1,0 +1,42 @@
+# Build outputs
+build/
+out/
+release/
+dist/
+vcpkg_installed/
+
+# Native build artifacts
+*.exe
+*.dll
+*.lib
+*.pdb
+*.obj
+*.ilk
+*.exp
+
+# Local config (only .example.json is tracked)
+config.json
+
+# Smoke-test artifacts
+*.log
+*.err.log
+*.h264
+*.bmp
+test.h264
+out.h264
+capture.bmp
+
+# IDE / editor files
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.sln.docstates
+CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
+
+# OS
+Thumbs.db
+.DS_Store
