@@ -7,15 +7,9 @@ REM  Usage:
 REM      release.bat [VERSION]      e.g. release.bat 0.1.0
 REM      release.bat                  -> uses dev-YYYYMMDD
 REM
-REM  Required env vars (User-scope works for double-click; per-shell exports
-REM  do NOT, because explorer.exe doesn't see your PowerShell session):
-REM      VCPKG_ROOT  - vcpkg root (must contain installed\x64-windows\bin with
-REM                    avcodec*.dll, avutil*.dll, swscale*.dll)
-REM      QT_DIR      - Qt msvc kit dir (e.g. ...\qt\6.7.3\msvc2022_64)
-REM
-REM  Set them persistently once (admin PowerShell):
-REM      [Environment]::SetEnvironmentVariable("VCPKG_ROOT", "E:\...\vcpkg", "User")
-REM      [Environment]::SetEnvironmentVariable("QT_DIR",     "E:\...\msvc2022_64", "User")
+REM  Paths to vcpkg + Qt are baked in below as defaults — see "Defaults"
+REM  section. Override with env vars only if your install lives elsewhere:
+REM      set VCPKG_ROOT=D:\my\vcpkg & release.bat
 REM
 REM  Output: release\agent-VERSION.zip, release\viewer-VERSION.zip
 REM ============================================================================
@@ -31,25 +25,20 @@ if "%~1"=="" (
     set "VERSION=%~1"
 )
 
-REM ---- Sanity check env -----------------------------------------------------
-if not defined VCPKG_ROOT (
-    echo. >&2
-    echo [release] VCPKG_ROOT is not set. >&2
-    echo. >&2
-    echo Set it persistently ^(admin PowerShell, then re-login or open a new window^): >&2
-    echo   [Environment]::SetEnvironmentVariable^("VCPKG_ROOT", "E:\Development_environment\vcpkg", "User"^) >&2
-    echo. >&2
-    goto :fail
-)
-if not defined QT_DIR (
-    echo. >&2
-    echo [release] QT_DIR is not set. >&2
-    echo. >&2
-    echo Set it persistently ^(admin PowerShell, then re-login or open a new window^): >&2
-    echo   [Environment]::SetEnvironmentVariable^("QT_DIR", "E:\Development_environment\qt\6.7.3\msvc2022_64", "User"^) >&2
-    echo. >&2
-    goto :fail
-)
+REM ---- Defaults (edit these once, no env vars needed) -----------------------
+REM Hardcoded paths for the standard dev machine. They're only used when the
+REM env vars aren't already set — so CI / another machine with different
+REM layout can still override with `set VCPKG_ROOT=... & release.bat`.
+if not defined VCPKG_ROOT set "VCPKG_ROOT=E:\Development_environment\vcpkg"
+if not defined QT_DIR     set "QT_DIR=E:\Development_environment\qt\6.7.3\msvc2022_64"
+
+REM ---- Validate the resolved paths actually point at something --------------
+REM Note: keep the if-block bodies short and parens-free — cmd's parser gets
+REM weird with literal parentheses inside if-block bodies even when balanced.
+set "VCPKG_PROBE=%VCPKG_ROOT%\installed\x64-windows\bin\avcodec-61.dll"
+set "QT_PROBE=%QT_DIR%\bin\Qt6Widgets.dll"
+if not exist "%VCPKG_PROBE%" goto :badVcpkg
+if not exist "%QT_PROBE%" goto :badQt
 where cmake >nul 2>nul || ( echo [release] cmake not on PATH. >&2 & goto :fail )
 where powershell >nul 2>nul || ( echo [release] powershell not on PATH. >&2 & goto :fail )
 
@@ -134,6 +123,26 @@ echo %CMDCMDLINE% | findstr /i /c:"/c" >nul && (
     pause >nul
 )
 endlocal & exit /b 0
+
+:badVcpkg
+echo.
+echo [release] VCPKG_ROOT does not look like a vcpkg install:
+echo     VCPKG_ROOT = %VCPKG_ROOT%
+echo     missing:     %VCPKG_PROBE%
+echo.
+echo Edit the default VCPKG_ROOT near the top of release.bat,
+echo or set VCPKG_ROOT in your environment before running.
+goto :fail
+
+:badQt
+echo.
+echo [release] QT_DIR does not look like a Qt msvc kit:
+echo     QT_DIR =     %QT_DIR%
+echo     missing:     %QT_PROBE%
+echo.
+echo Edit the default QT_DIR near the top of release.bat,
+echo or set QT_DIR in your environment before running.
+goto :fail
 
 :fail
 echo.
