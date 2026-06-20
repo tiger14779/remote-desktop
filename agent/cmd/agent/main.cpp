@@ -137,7 +137,11 @@ private:
         ec.height = frame.height;
         ec.fps = fps_;
         ec.bitrateKbps = bitrateKbps_;
-        ec.gopSize = fps_ * 2;
+        // GOP = 1 second's worth of frames. Combined with intra-refresh
+        // (configured per-encoder in H264Encoder), this controls how fast a
+        // freshly-joined viewer gets a fully-refreshed picture without
+        // bursting bandwidth on full IDR frames.
+        ec.gopSize = fps_;
         std::string chosen;
         if (!enc.Init(ec, &chosen, &err)) {
             std::cerr << "encoder init failed: " << err << "\n";
@@ -147,14 +151,24 @@ private:
                   << " @ " << ec.fps << " fps (" << chosen << ")\n";
 
         const auto interval = std::chrono::milliseconds(1000 / fps_);
+        // After this much continuous idle (no DXGI dirty rects), the next
+        // frame we DO send will be a forced IDR. This lets a viewer that
+        // joined or lost packets during the idle stretch recover immediately
+        // when the screen starts changing again, without sitting on a stale
+        // last frame for a full GOP.
+        const auto kKeepaliveInterval = std::chrono::seconds(2);
+
         auto next = std::chrono::steady_clock::now();
         int64_t pts = 0;
 
-        // First frame is the one we already captured above.
-        if (!encodeAndSend(enc, frame, pts++, &err)) {
+        // First frame after SESSION_START is always IDR — encoder Init() does
+        // that for us — and serves as the "last sent" reference for the loop.
+        if (!encodeAndSend(enc, frame, pts++, /*forceIdr=*/false, &err)) {
             std::cerr << "first encode/send failed: " << err << "\n";
             return;
         }
+        auto lastSent = std::chrono::steady_clock::now();
+        bool wasIdle = false;
 
         while (sessionActive_) {
             next += interval;
@@ -166,23 +180,39 @@ private:
                 std::cerr << "capture error: " << err << "\n";
                 return;
             }
-            if (r == DxgiCapturer::Result::kFrame) {
-                frame = std::move(fresh);
+            const bool gotNew = (r == DxgiCapturer::Result::kFrame);
+
+            const auto now = std::chrono::steady_clock::now();
+            const bool keepaliveDue = (now - lastSent) >= kKeepaliveInterval;
+
+            // No dirty rects AND not time for a keepalive yet → skip entirely.
+            // This is the main bandwidth+CPU win for static screens (typical
+            // code-editor / reading workloads spend ~95% of time here).
+            if (!gotNew && !keepaliveDue) {
+                wasIdle = true;
+                continue;
             }
-            // If no new frame, re-encode the previous one so cadence stays
-            // even — keeps the viewer's clock from stalling on a static screen.
-            if (!encodeAndSend(enc, frame, pts++, &err)) {
+
+            if (gotNew) frame = std::move(fresh);
+
+            // Force an IDR if we're emerging from an idle stretch, so any
+            // viewer that lost packets while we weren't sending resyncs on
+            // the very next frame instead of waiting up to a full GOP.
+            const bool forceIdr = wasIdle;
+            if (!encodeAndSend(enc, frame, pts++, forceIdr, &err)) {
                 std::cerr << "encode/send failed: " << err << "\n";
                 return;
             }
+            lastSent = now;
+            wasIdle = false;
         }
         std::cout << "session ended\n";
     }
 
     bool encodeAndSend(H264Encoder& enc, const DxgiCapturer::Frame& f,
-                       int64_t pts, std::string* err) {
+                       int64_t pts, bool forceIdr, std::string* err) {
         std::vector<std::vector<std::uint8_t>> pkts;
-        if (!enc.EncodeFrame(f.pixels.data(), f.rowPitch, pts, &pkts, err)) {
+        if (!enc.EncodeFrame(f.pixels.data(), f.rowPitch, pts, forceIdr, &pkts, err)) {
             return false;
         }
         for (const auto& p : pkts) {

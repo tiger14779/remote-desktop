@@ -21,25 +21,41 @@ std::string avErr(const std::string& what, int err) {
 }
 
 // Per-encoder tuning. Anything not listed falls back to encoder defaults.
+//
+// Intra-refresh (rolling I-stripe instead of periodic IDR keyframes):
+//   - Eliminates the periodic bandwidth spike from full IDR frames
+//   - Each frame intra-codes ~1/gop_size of the picture; after gop_size
+//     frames, the whole picture has been refreshed
+//   - Standard technique for cloud gaming / low-latency screen streaming
+//   - Supported on libx264 and h264_nvenc; h264_qsv via int_ref_type; not
+//     exposed cleanly on h264_amf or h264_mf
 void applyLowLatencyTuning(AVCodecContext* ctx, const char* encoderName) {
     const std::string name = encoderName;
     if (name == "libx264") {
-        av_opt_set(ctx->priv_data, "preset", "ultrafast", 0);
+        av_opt_set(ctx->priv_data, "preset", "fast", 0);          // not ultrafast — too lossy for text
         av_opt_set(ctx->priv_data, "tune", "zerolatency", 0);
-        av_opt_set(ctx->priv_data, "x264-params", "scenecut=0:repeat-headers=1", 0);
+        av_opt_set(ctx->priv_data, "profile", "high", 0);         // high profile = CABAC + 8x8 transform = sharper text
+        av_opt_set(ctx->priv_data, "x264-params",
+                   "scenecut=0:repeat-headers=1:intra-refresh=1:ref=1:bframes=0", 0);
     } else if (name == "h264_nvenc") {
         av_opt_set(ctx->priv_data, "preset", "p4", 0);
-        av_opt_set(ctx->priv_data, "tune", "ll", 0);   // low-latency
+        av_opt_set(ctx->priv_data, "tune", "ll", 0);
         av_opt_set(ctx->priv_data, "zerolatency", "1", 0);
-        av_opt_set(ctx->priv_data, "rc", "cbr", 0);
+        av_opt_set(ctx->priv_data, "rc", "vbr", 0);                // vbr keeps quality higher than cbr at low bitrate
+        av_opt_set(ctx->priv_data, "intra-refresh", "1", 0);
     } else if (name == "h264_amf") {
         av_opt_set(ctx->priv_data, "usage", "ultralowlatency", 0);
         av_opt_set(ctx->priv_data, "quality", "speed", 0);
     } else if (name == "h264_qsv") {
         av_opt_set(ctx->priv_data, "preset", "veryfast", 0);
+        av_opt_set(ctx->priv_data, "int_ref_type", "vertical", 0); // vertical stripe intra-refresh
+        av_opt_set(ctx->priv_data, "int_ref_cycle_size", "30", 0);
     } else if (name == "h264_mf") {
         av_opt_set(ctx->priv_data, "scenario", "live_streaming", 0);
         av_opt_set(ctx->priv_data, "rate_control", "cbr", 0);
+        // h264_mf doesn't expose intra-refresh; it'll fall back to IDR
+        // keyframes at ctx->gop_size cadence. Quality is the worst of the
+        // bunch — install ffmpeg[x264] in vcpkg to unlock libx264.
     }
 }
 } // namespace
@@ -67,8 +83,12 @@ H264Encoder::~H264Encoder() = default;
 bool H264Encoder::Init(const Config& cfg, std::string* chosenEncoder, std::string* errorOut) {
     impl_->cfg = cfg;
 
+    // Priority: hardware encoders first (lowest latency, lowest CPU), then
+    // libx264 (best quality at low bitrate), then h264_mf (worst, last resort).
+    // h264_mf used to be 4th here, but its screen-content quality is so bad
+    // that we'd rather burn a bit of CPU on libx264 when no hwenc is around.
     static const std::array<const char*, 5> kPriority = {
-        "h264_nvenc", "h264_amf", "h264_qsv", "h264_mf", "libx264",
+        "h264_nvenc", "h264_amf", "h264_qsv", "libx264", "h264_mf",
     };
 
     std::string lastErr;
@@ -145,6 +165,7 @@ bool H264Encoder::Init(const Config& cfg, std::string* chosenEncoder, std::strin
 }
 
 bool H264Encoder::EncodeFrame(const uint8_t* bgra, int rowPitch, int64_t pts,
+                              bool forceKeyframe,
                               std::vector<std::vector<uint8_t>>* outPackets,
                               std::string* errorOut) {
     if (!impl_->ctx) {
@@ -164,6 +185,9 @@ bool H264Encoder::EncodeFrame(const uint8_t* bgra, int rowPitch, int64_t pts,
               impl_->frame->data, impl_->frame->linesize);
 
     impl_->frame->pts = pts;
+    // Setting pict_type = I is what the encoder actually checks to produce
+    // an IDR; AVFrame::key_frame was deprecated in FFmpeg 6.x.
+    impl_->frame->pict_type = forceKeyframe ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
 
     err = avcodec_send_frame(impl_->ctx, impl_->frame);
     if (err < 0) {

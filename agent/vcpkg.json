@@ -3,5 +3,11 @@
   "name": "remote-desktop-agent",
   "version": "0.1.0",
   "description": "Agent (controlled-side) for the self-hosted remote desktop platform.",
-  "dependencies": []
+  "dependencies": [
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": ["avcodec", "avformat", "swscale", "x264"]
+    }
+  ]
 }

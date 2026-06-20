@@ -72,7 +72,7 @@ int main(int argc, char** argv) {
 
     auto encodeFirst = [&]() {
         std::vector<std::vector<uint8_t>> pkts;
-        if (!enc.EncodeFrame(frame.pixels.data(), frame.rowPitch, 0, &pkts, &err)) {
+        if (!enc.EncodeFrame(frame.pixels.data(), frame.rowPitch, 0, /*forceIdr=*/false, &pkts, &err)) {
             std::cerr << "encode: " << err << "\n";
             return false;
         }
@@ -106,7 +106,7 @@ int main(int argc, char** argv) {
         }
 
         std::vector<std::vector<uint8_t>> pkts;
-        if (!enc.EncodeFrame(frame.pixels.data(), frame.rowPitch, pts, &pkts, &err)) {
+        if (!enc.EncodeFrame(frame.pixels.data(), frame.rowPitch, pts, /*forceIdr=*/false, &pkts, &err)) {
             std::cerr << "encode: " << err << "\n";
             return 4;
         }

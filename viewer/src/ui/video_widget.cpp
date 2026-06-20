@@ -31,6 +31,10 @@ void VideoWidget::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.fillRect(rect(), Qt::black);
     if (current_.isNull()) return;
+    // SmoothPixmapTransform on: bilinear downscale. Without it, downscaling a
+    // 4K source to a 1280x720 window does nearest-neighbour and text turns
+    // crunchy. With it, text edges stay legible at the cost of some CPU.
+    p.setRenderHint(QPainter::SmoothPixmapTransform, true);
     p.drawImage(videoTarget(), current_);
 }
 

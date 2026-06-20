@@ -35,7 +35,12 @@ public:
 
     // Encode one BGRA frame. May produce zero, one, or several Annex-B NAL
     // packets, appended to outPackets in order.
+    //
+    // If forceKeyframe is true, this frame is encoded as an IDR (also resets
+    // any intra-refresh cycle). Used to resync the decoder after a long idle
+    // gap during which the agent skipped sending frames.
     bool EncodeFrame(const uint8_t* bgra, int rowPitch, int64_t pts,
+                     bool forceKeyframe,
                      std::vector<std::vector<uint8_t>>* outPackets,
                      std::string* errorOut);
 
