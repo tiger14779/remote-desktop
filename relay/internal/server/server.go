@@ -27,7 +27,13 @@ import (
 	"remote_desktop/relay/internal/safeconn"
 )
 
-const handshakeTimeout = 10 * time.Second
+const (
+	handshakeTimeout = 10 * time.Second
+	// idleTimeout closes a connection if no frame arrives in this long. The
+	// agent / viewer are expected to send HEARTBEAT every 5s, so anything
+	// approaching this value implies the link is dead.
+	idleTimeout = 30 * time.Second
+)
 
 type Server struct {
 	addr  string
@@ -114,6 +120,10 @@ func (s *Server) handleAgent(conn *safeconn.Conn, first *protocol.Frame) {
 func (s *Server) agentReadLoop(dev *hub.Device) {
 	addr := dev.Conn.RemoteAddr()
 	for {
+		// Idle timeout: bumped after every successful read. A client that
+		// stops sending heartbeats (or whose TCP died silently) hits this and
+		// we close the connection instead of leaking it forever.
+		_ = dev.Conn.Net().SetReadDeadline(time.Now().Add(idleTimeout))
 		f, err := dev.Conn.ReadFrame()
 		if err != nil {
 			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
@@ -211,6 +221,7 @@ func (s *Server) handleViewer(conn *safeconn.Conn, first *protocol.Frame) {
 	defer log.Printf("[%s] session end:   %s <-> %s", addr, authReq.Account, dev.ID)
 
 	for {
+		_ = conn.Net().SetReadDeadline(time.Now().Add(idleTimeout))
 		f, err := conn.ReadFrame()
 		if err != nil {
 			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {

@@ -29,7 +29,8 @@ int main(int argc, char** argv) {
 
     H264Decoder dec;
     std::string err;
-    if (!dec.Init(&err)) {
+    std::string mode;
+    if (!dec.Init(&mode, &err)) {
         std::cerr << "decoder init: " << err << "\n";
         return 2;
     }
@@ -80,7 +81,7 @@ int main(int argc, char** argv) {
     av_parser_close(parser);
     avcodec_free_context(&parserCtx);
 
-    std::cout << "decoded " << total << " frame(s), last size "
-              << lastW << "x" << lastH << "\n";
+    std::cout << "decoded " << total << " frame(s) via " << mode
+              << ", last size " << lastW << "x" << lastH << "\n";
     return total > 0 ? 0 : 3;
 }

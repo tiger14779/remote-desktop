@@ -2,7 +2,9 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 }
 
@@ -22,24 +24,47 @@ struct H264Decoder::Impl {
     const AVCodec* codec = nullptr;
     AVCodecContext* ctx = nullptr;
     AVFrame* frame = nullptr;
+    AVFrame* swFrame = nullptr; // staging buffer for hw→sw download
     AVPacket* pkt = nullptr;
     SwsContext* sws = nullptr;
     int swsWidth = 0;
     int swsHeight = 0;
     AVPixelFormat swsSrcFmt = AV_PIX_FMT_NONE;
 
+    AVBufferRef* hwDeviceCtx = nullptr;
+    AVPixelFormat hwPixFmt = AV_PIX_FMT_NONE;
+
     ~Impl() {
         if (sws) sws_freeContext(sws);
         if (frame) av_frame_free(&frame);
+        if (swFrame) av_frame_free(&swFrame);
         if (pkt) av_packet_free(&pkt);
         if (ctx) avcodec_free_context(&ctx);
+        if (hwDeviceCtx) av_buffer_unref(&hwDeviceCtx);
     }
 };
+
+namespace {
+// Negotiates the surface format with the decoder. We get called once after
+// the decoder parses SPS/PPS and knows resolution. Returning hwPixFmt tells
+// libavcodec "yes, we have a hwaccel binding for that — go ahead and decode
+// onto a D3D11 texture". Returning the first software entry (typically
+// AV_PIX_FMT_YUV420P) takes the software path instead.
+AVPixelFormat getFormatCallback(AVCodecContext* ctx, const AVPixelFormat* pixFmts) {
+    auto* impl = static_cast<H264Decoder::Impl*>(ctx->opaque);
+    if (impl && impl->hwPixFmt != AV_PIX_FMT_NONE) {
+        for (const AVPixelFormat* p = pixFmts; *p != AV_PIX_FMT_NONE; ++p) {
+            if (*p == impl->hwPixFmt) return *p;
+        }
+    }
+    return pixFmts[0];
+}
+} // namespace
 
 H264Decoder::H264Decoder() : impl_(std::make_unique<Impl>()) {}
 H264Decoder::~H264Decoder() = default;
 
-bool H264Decoder::Init(std::string* errorOut) {
+bool H264Decoder::Init(std::string* mode, std::string* errorOut) {
     impl_->codec = avcodec_find_decoder(AV_CODEC_ID_H264);
     if (!impl_->codec) {
         if (errorOut) *errorOut = "libavcodec lacks the H.264 decoder";
@@ -50,7 +75,26 @@ bool H264Decoder::Init(std::string* errorOut) {
         if (errorOut) *errorOut = "avcodec_alloc_context3 failed";
         return false;
     }
-    impl_->ctx->thread_count = 0; // auto
+    impl_->ctx->thread_count = 0; // auto, only used on software path
+
+    // Try D3D11VA. If anything goes wrong here we silently keep
+    // hwDeviceCtx == nullptr and fall through to software decode.
+    AVBufferRef* hwCtx = nullptr;
+    int hwErr = av_hwdevice_ctx_create(&hwCtx, AV_HWDEVICE_TYPE_D3D11VA,
+                                       nullptr, nullptr, 0);
+    if (hwErr >= 0) {
+        impl_->hwDeviceCtx = hwCtx;
+        impl_->hwPixFmt = AV_PIX_FMT_D3D11;
+        impl_->ctx->hw_device_ctx = av_buffer_ref(hwCtx);
+        impl_->ctx->opaque = impl_.get();
+        impl_->ctx->get_format = getFormatCallback;
+        impl_->swFrame = av_frame_alloc();
+        if (!impl_->swFrame) {
+            if (errorOut) *errorOut = "av_frame_alloc(swFrame) failed";
+            return false;
+        }
+    }
+
     int err = avcodec_open2(impl_->ctx, impl_->codec, nullptr);
     if (err < 0) {
         if (errorOut) *errorOut = avErr("avcodec_open2", err);
@@ -62,6 +106,7 @@ bool H264Decoder::Init(std::string* errorOut) {
         if (errorOut) *errorOut = "av_frame_alloc / av_packet_alloc failed";
         return false;
     }
+    if (mode) *mode = impl_->hwDeviceCtx ? "d3d11va" : "software";
     return true;
 }
 
@@ -89,11 +134,26 @@ bool H264Decoder::DecodePacket(const std::uint8_t* data, std::size_t size,
             return false;
         }
 
-        const int w = impl_->frame->width;
-        const int h = impl_->frame->height;
-        const auto srcFmt = static_cast<AVPixelFormat>(impl_->frame->format);
+        AVFrame* src = impl_->frame;
+        AVPixelFormat srcFmt = static_cast<AVPixelFormat>(impl_->frame->format);
+        const bool wasOnGpu = (srcFmt == impl_->hwPixFmt && impl_->hwDeviceCtx);
+        if (wasOnGpu) {
+            // GPU-decoded — pull down to CPU memory for swscale.
+            // The downloaded format is typically NV12 (D3D11VA's surface
+            // format on most GPUs). sws_scale handles NV12→BGRA natively.
+            err = av_hwframe_transfer_data(impl_->swFrame, impl_->frame, 0);
+            if (err < 0) {
+                av_frame_unref(impl_->frame);
+                if (errorOut) *errorOut = avErr("av_hwframe_transfer_data", err);
+                return false;
+            }
+            src = impl_->swFrame;
+            srcFmt = static_cast<AVPixelFormat>(impl_->swFrame->format);
+        }
 
-        // Lazily create sws context, rebuild on resolution/format change.
+        const int w = src->width;
+        const int h = src->height;
+
         if (!impl_->sws || impl_->swsWidth != w || impl_->swsHeight != h ||
             impl_->swsSrcFmt != srcFmt) {
             if (impl_->sws) sws_freeContext(impl_->sws);
@@ -102,6 +162,8 @@ bool H264Decoder::DecodePacket(const std::uint8_t* data, std::size_t size,
                 w, h, AV_PIX_FMT_BGRA,
                 SWS_BILINEAR, nullptr, nullptr, nullptr);
             if (!impl_->sws) {
+                av_frame_unref(impl_->frame);
+                if (wasOnGpu) av_frame_unref(impl_->swFrame);
                 if (errorOut) *errorOut = "sws_getContext failed";
                 return false;
             }
@@ -118,11 +180,12 @@ bool H264Decoder::DecodePacket(const std::uint8_t* data, std::size_t size,
 
         std::uint8_t* dstSlices[1] = { out.pixels.data() };
         int dstStrides[1] = { out.rowBytes };
-        sws_scale(impl_->sws, impl_->frame->data, impl_->frame->linesize, 0, h,
+        sws_scale(impl_->sws, src->data, src->linesize, 0, h,
                   dstSlices, dstStrides);
 
         outFrames->push_back(std::move(out));
         av_frame_unref(impl_->frame);
+        if (wasOnGpu) av_frame_unref(impl_->swFrame);
     }
     return true;
 }

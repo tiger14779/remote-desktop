@@ -72,4 +72,8 @@ bool RelayClient::SendVideoFrame(const std::uint8_t* data, std::size_t size,
     return proto::WriteFrame(sock_, proto::MsgVideoFrame, data, size, errorOut);
 }
 
+bool RelayClient::SendHeartbeat(std::string* errorOut) {
+    return proto::WriteFrame(sock_, proto::MsgHeartbeat, nullptr, 0, errorOut);
+}
+
 void RelayClient::Close() { sock_.Close(); }

@@ -8,6 +8,8 @@
 #include <QString>
 
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 
 // Worker QObject that lives on a background QThread. Receives VIDEO_FRAME
 // from the relay, decodes, converts to QImage, and emits frameReady to the GUI
@@ -46,9 +48,17 @@ signals:
     void disconnected(const QString& reason);
 
 private:
+    // Sleeps for up to dt, but returns early if requestStop() fires.
+    // Returns true if stop was requested during the wait.
+    bool waitOrStop(std::chrono::milliseconds dt);
+
     ViewerRelayClient client_;
     H264Decoder decoder_;
     std::atomic<bool> stopping_{false};
+
+    // Used by requestStop() to wake the reconnect-backoff sleep.
+    std::mutex stopMu_;
+    std::condition_variable stopCv_;
 };
 
 Q_DECLARE_METATYPE(ViewerSession::Config)

@@ -37,6 +37,9 @@ public:
     bool SendInput(std::uint8_t type, const std::uint8_t* data, std::size_t size,
                    std::string* errorOut);
 
+    // Thread-safe. Empty HEARTBEAT frame; keeps the relay's idle timer fresh.
+    bool SendHeartbeat(std::string* errorOut);
+
     void Close();
 
 private:

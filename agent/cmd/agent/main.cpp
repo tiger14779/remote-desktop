@@ -252,35 +252,68 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    RelayClient client;
-    RelayClient::Config rc;
-    rc.host = host;
-    rc.port = port;
-    rc.deviceId = flags.deviceId;
-    rc.deviceToken = flags.deviceToken;
-    if (!client.ConnectAndRegister(rc, &err)) {
-        std::cerr << "relay: " << err << "\n";
-        return 3;
-    }
-    std::cout << "registered with relay as " << flags.deviceId
-              << ", waiting for session\n";
+    // Reconnect loop. The capturer is reused across attempts; the relay
+    // client + stream pump are recreated each time because Run() returning
+    // means the socket is in an unknown state.
+    int backoffSec = 1;
+    constexpr int kMaxBackoffSec = 30;
 
-    StreamPump pump(&cap, &client, flags.fps, flags.bitrateKbps);
-    pump.Start();
-
-    RelayClient::Callbacks cb;
-    cb.onSessionStart = [&]() { pump.OnSessionStart(); };
-    cb.onSessionEnd   = [&]() { pump.OnSessionEnd(); };
-    cb.onInput = [](std::uint8_t type, const std::uint8_t* data, std::size_t size) {
-        std::string err;
-        if (!input::HandleInputFrame(type, data, size, &err)) {
-            std::cerr << "drop " << proto::MessageTypeName(type)
-                      << " (" << size << "B): " << err << "\n";
+    while (true) {
+        RelayClient client;
+        RelayClient::Config rc;
+        rc.host = host;
+        rc.port = port;
+        rc.deviceId = flags.deviceId;
+        rc.deviceToken = flags.deviceToken;
+        if (!client.ConnectAndRegister(rc, &err)) {
+            std::cerr << "relay: " << err << " — retrying in "
+                      << backoffSec << "s\n";
+            std::this_thread::sleep_for(std::chrono::seconds(backoffSec));
+            backoffSec = std::min(backoffSec * 2, kMaxBackoffSec);
+            continue;
         }
-    };
-    client.Run(cb);
+        std::cout << "registered with relay as " << flags.deviceId
+                  << ", waiting for session\n";
+        backoffSec = 1; // reset backoff after a successful connect
 
-    pump.Stop();
-    client.Close();
-    return 0;
+        StreamPump pump(&cap, &client, flags.fps, flags.bitrateKbps);
+        pump.Start();
+
+        // Heartbeat sender: every 5s, keeps the relay's idle timer alive and
+        // gives us a fast disconnect detection if the link goes away (the
+        // next send will fail, the read loop will also bail).
+        std::atomic<bool> hbStop{false};
+        std::thread hbThread([&]() {
+            while (!hbStop.load()) {
+                for (int i = 0; i < 50 && !hbStop.load(); ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                if (hbStop.load()) break;
+                std::string hbErr;
+                if (!client.SendHeartbeat(&hbErr)) break;
+            }
+        });
+
+        RelayClient::Callbacks cb;
+        cb.onSessionStart = [&]() { pump.OnSessionStart(); };
+        cb.onSessionEnd   = [&]() { pump.OnSessionEnd(); };
+        cb.onInput = [](std::uint8_t type, const std::uint8_t* data, std::size_t size) {
+            std::string err;
+            if (!input::HandleInputFrame(type, data, size, &err)) {
+                std::cerr << "drop " << proto::MessageTypeName(type)
+                          << " (" << size << "B): " << err << "\n";
+            }
+        };
+        client.Run(cb);
+
+        // Tear down this attempt.
+        hbStop.store(true);
+        hbThread.join();
+        pump.Stop();
+        client.Close();
+
+        std::cerr << "disconnected — reconnecting in " << backoffSec << "s\n";
+        std::this_thread::sleep_for(std::chrono::seconds(backoffSec));
+        backoffSec = std::min(backoffSec * 2, kMaxBackoffSec);
+    }
 }

@@ -38,6 +38,10 @@ public:
     // Thread-safe. Sends a VIDEO_FRAME with the given Annex-B payload.
     bool SendVideoFrame(const std::uint8_t* data, std::size_t size, std::string* errorOut);
 
+    // Thread-safe. Sends an empty HEARTBEAT frame; the relay reflects it
+    // back so we can also detect a dead link via the read loop's timeout.
+    bool SendHeartbeat(std::string* errorOut);
+
     void Close();
 
 private:

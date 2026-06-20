@@ -28,13 +28,19 @@ public:
     H264Decoder(const H264Decoder&) = delete;
     H264Decoder& operator=(const H264Decoder&) = delete;
 
-    bool Init(std::string* errorOut);
+    // Init tries D3D11VA hardware decode first; falls back to software if the
+    // hwaccel isn't available (no GPU support, ffmpeg built without d3d11va,
+    // missing driver, ...). On success, *mode reports the actual decoder
+    // path: either "d3d11va" or "software".
+    bool Init(std::string* mode, std::string* errorOut);
 
     bool DecodePacket(const std::uint8_t* data, std::size_t size,
                       std::vector<DecodedFrame>* outFrames,
                       std::string* errorOut);
 
-private:
+    // Public so the static get_format callback can reach it.
     struct Impl;
+
+private:
     std::unique_ptr<Impl> impl_;
 };

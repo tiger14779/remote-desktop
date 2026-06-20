@@ -79,4 +79,8 @@ bool ViewerRelayClient::SendInput(std::uint8_t type, const std::uint8_t* data,
     return proto::WriteFrame(sock_, type, data, size, errorOut);
 }
 
+bool ViewerRelayClient::SendHeartbeat(std::string* errorOut) {
+    return proto::WriteFrame(sock_, proto::MsgHeartbeat, nullptr, 0, errorOut);
+}
+
 void ViewerRelayClient::Close() { sock_.Close(); }
