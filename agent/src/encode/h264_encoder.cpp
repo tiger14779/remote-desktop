@@ -8,6 +8,7 @@ extern "C" {
 }
 
 #include <array>
+#include <iostream>
 #include <sstream>
 #include <string>
 
@@ -91,16 +92,22 @@ bool H264Encoder::Init(const Config& cfg, std::string* chosenEncoder, std::strin
         "h264_nvenc", "h264_amf", "h264_qsv", "libx264", "h264_mf",
     };
 
+    // Tells the operator exactly which encoders are missing from the build
+    // and which ones tried-but-failed-to-open. This is the cheapest possible
+    // answer to "why did it pick h264_mf?" — you read the stderr log.
+    std::cerr << "[encoder] probing in order: nvenc, amf, qsv, libx264, mf\n";
     std::string lastErr;
     for (const char* name : kPriority) {
         const AVCodec* codec = avcodec_find_encoder_by_name(name);
         if (!codec) {
-            lastErr = std::string(name) + ": not built into this libavcodec";
+            std::cerr << "[encoder] " << name << ": not built into this libavcodec\n";
+            lastErr = std::string(name) + ": not built";
             continue;
         }
         AVCodecContext* ctx = avcodec_alloc_context3(codec);
         if (!ctx) {
-            lastErr = std::string(name) + ": avcodec_alloc_context3 failed";
+            std::cerr << "[encoder] " << name << ": avcodec_alloc_context3 failed\n";
+            lastErr = std::string(name) + ": alloc failed";
             continue;
         }
         ctx->width = cfg.width;
@@ -117,10 +124,13 @@ bool H264Encoder::Init(const Config& cfg, std::string* chosenEncoder, std::strin
 
         int err = avcodec_open2(ctx, codec, nullptr);
         if (err < 0) {
-            lastErr = avErr(std::string(name) + ": avcodec_open2", err);
+            std::cerr << "[encoder] " << name << ": "
+                      << avErr("open", err) << "\n";
+            lastErr = avErr(std::string(name) + ": open", err);
             avcodec_free_context(&ctx);
             continue;
         }
+        std::cerr << "[encoder] " << name << ": OK — using this one\n";
 
         impl_->codec = codec;
         impl_->ctx = ctx;

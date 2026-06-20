@@ -151,23 +151,16 @@ private:
                   << " @ " << ec.fps << " fps (" << chosen << ")\n";
 
         const auto interval = std::chrono::milliseconds(1000 / fps_);
-        // After this much continuous idle (no DXGI dirty rects), the next
-        // frame we DO send will be a forced IDR. This lets a viewer that
-        // joined or lost packets during the idle stretch recover immediately
-        // when the screen starts changing again, without sitting on a stale
-        // last frame for a full GOP.
-        const auto kKeepaliveInterval = std::chrono::seconds(2);
 
         auto next = std::chrono::steady_clock::now();
         int64_t pts = 0;
 
-        // First frame after SESSION_START is always IDR — encoder Init() does
-        // that for us — and serves as the "last sent" reference for the loop.
+        // First frame after SESSION_START is always IDR — encoder Init()
+        // does that for us.
         if (!encodeAndSend(enc, frame, pts++, /*forceIdr=*/false, &err)) {
             std::cerr << "first encode/send failed: " << err << "\n";
             return;
         }
-        auto lastSent = std::chrono::steady_clock::now();
         bool wasIdle = false;
 
         while (sessionActive_) {
@@ -182,28 +175,26 @@ private:
             }
             const bool gotNew = (r == DxgiCapturer::Result::kFrame);
 
-            const auto now = std::chrono::steady_clock::now();
-            const bool keepaliveDue = (now - lastSent) >= kKeepaliveInterval;
-
-            // No dirty rects AND not time for a keepalive yet → skip entirely.
-            // This is the main bandwidth+CPU win for static screens (typical
-            // code-editor / reading workloads spend ~95% of time here).
-            if (!gotNew && !keepaliveDue) {
+            // No DXGI dirty rects → send NOTHING. The relay link stays alive
+            // via HEARTBEAT (T2-6), so we don't need to pump video keepalives
+            // every 2s the way the old code did. On a truly static screen
+            // (reading docs, editor with no input) the link is silent except
+            // for the 5s heartbeat.
+            if (!gotNew) {
                 wasIdle = true;
                 continue;
             }
 
-            if (gotNew) frame = std::move(fresh);
+            frame = std::move(fresh);
 
-            // Force an IDR if we're emerging from an idle stretch, so any
-            // viewer that lost packets while we weren't sending resyncs on
-            // the very next frame instead of waiting up to a full GOP.
+            // First frame coming out of an idle stretch is forced-IDR so any
+            // viewer that lost packets during the silence resyncs on this
+            // frame instead of waiting for the next intra-refresh cycle.
             const bool forceIdr = wasIdle;
             if (!encodeAndSend(enc, frame, pts++, forceIdr, &err)) {
                 std::cerr << "encode/send failed: " << err << "\n";
                 return;
             }
-            lastSent = now;
             wasIdle = false;
         }
         std::cout << "session ended\n";

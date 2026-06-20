@@ -176,9 +176,10 @@ bool H264Decoder::DecodePacket(const std::uint8_t* data, std::size_t size,
         out.width = w;
         out.height = h;
         out.rowBytes = w * 4;
-        out.pixels.resize(static_cast<std::size_t>(out.rowBytes) * h);
+        out.pixels = std::make_shared<std::vector<std::uint8_t>>(
+            static_cast<std::size_t>(out.rowBytes) * h);
 
-        std::uint8_t* dstSlices[1] = { out.pixels.data() };
+        std::uint8_t* dstSlices[1] = { out.pixels->data() };
         int dstStrides[1] = { out.rowBytes };
         sws_scale(impl_->sws, src->data, src->linesize, 0, h,
                   dstSlices, dstStrides);

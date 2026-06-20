@@ -19,7 +19,11 @@ public:
         int width = 0;
         int height = 0;
         int rowBytes = 0; // equals width * 4
-        std::vector<std::uint8_t> pixels;
+        // Heap-owned BGRA buffer. We hand this out as a shared_ptr so the
+        // viewer side can wrap it in a QImage with a cleanup callback that
+        // releases the ref — no deep copy on the network → GUI thread hop,
+        // which is the dominant cost at 4K (33 MB / frame).
+        std::shared_ptr<std::vector<std::uint8_t>> pixels;
     };
 
     H264Decoder();

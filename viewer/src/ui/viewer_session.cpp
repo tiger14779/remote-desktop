@@ -55,9 +55,16 @@ void ViewerSession::start(Config cfg) {
             return;
         }
         for (auto& f : frames) {
-            QImage shallow(f.pixels.data(), f.width, f.height, f.rowBytes,
-                           QImage::Format_RGB32);
-            emit frameReady(shallow.copy());
+            // Wrap the decoder's shared buffer in a QImage with a cleanup
+            // callback so QImage's implicit refcount drives the buffer's
+            // lifetime — no memcpy on the network -> GUI thread hop.
+            using BufRef = std::shared_ptr<std::vector<std::uint8_t>>;
+            auto* keepAlive = new BufRef(f.pixels);
+            QImage img(f.pixels->data(), f.width, f.height, f.rowBytes,
+                       QImage::Format_RGB32,
+                       [](void* p) { delete static_cast<BufRef*>(p); },
+                       keepAlive);
+            emit frameReady(img);
         }
     };
     cb.onDisconnect = [this]() {};
