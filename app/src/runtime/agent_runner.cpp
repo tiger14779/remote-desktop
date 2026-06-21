@@ -110,6 +110,14 @@ private:
                            &firstBytes, &err)) return;
         bool wasIdle = false;
 
+        // Per-frame + per-2s diagnostics. Surfaces "encode too slow" and
+        // "scene change emits a giant frame" as the actual lag culprits.
+        auto statStart = std::chrono::steady_clock::now();
+        int statFrames = 0;
+        std::size_t statBytes = 0;
+        long long statMaxMs = 0;
+        std::size_t statMaxBytes = 0;
+
         while (sessionActive_) {
             next += interval;
             std::this_thread::sleep_until(next);
@@ -124,9 +132,40 @@ private:
             }
             if (r != DxgiCapturer::Result::kFrame) { wasIdle = true; continue; }
             frame = std::move(fresh);
-            std::size_t bytes = 0;
-            if (!encodeAndSend(enc, frame, pts++, wasIdle, &bytes, &err)) return;
+
+            const bool forceIdr = wasIdle;
+            std::size_t thisBytes = 0;
+            const auto t0 = std::chrono::steady_clock::now();
+            if (!encodeAndSend(enc, frame, pts++, forceIdr, &thisBytes, &err)) return;
+            const auto t1 = std::chrono::steady_clock::now();
+            const long long encMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
             wasIdle = false;
+
+            // Per-frame warning. Scene-change forced IDR + slow encode is
+            // the usual fingerprint for the click-to-display lag spike.
+            if (encMs > 50 || thisBytes > 200 * 1024) {
+                std::cerr << "[stat] heavy frame: " << encMs << "ms, "
+                          << (thisBytes / 1024) << "KB"
+                          << (forceIdr ? " (forced IDR)" : "") << "\n";
+            }
+            statFrames++;
+            statBytes += thisBytes;
+            if (encMs > statMaxMs) statMaxMs = encMs;
+            if (thisBytes > statMaxBytes) statMaxBytes = thisBytes;
+            const auto since =
+                std::chrono::duration_cast<std::chrono::seconds>(t1 - statStart).count();
+            if (since >= 2) {
+                std::cerr << "[stat] " << statFrames << " frames in " << since
+                          << "s, total " << (statBytes / 1024) << "KB"
+                          << ", max-enc " << statMaxMs << "ms"
+                          << ", max-frame " << (statMaxBytes / 1024) << "KB\n";
+                statStart = t1;
+                statFrames = 0;
+                statBytes = 0;
+                statMaxMs = 0;
+                statMaxBytes = 0;
+            }
         }
     }
 
