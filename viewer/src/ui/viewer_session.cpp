@@ -54,18 +54,28 @@ void ViewerSession::start(Config cfg) {
             qWarning("decode: %s", err.c_str());
             return;
         }
-        for (auto& f : frames) {
-            // Wrap the decoder's shared buffer in a QImage with a cleanup
-            // callback so QImage's implicit refcount drives the buffer's
-            // lifetime — no memcpy on the network -> GUI thread hop.
-            using BufRef = std::shared_ptr<std::vector<std::uint8_t>>;
-            auto* keepAlive = new BufRef(f.pixels);
-            QImage img(f.pixels->data(), f.width, f.height, f.rowBytes,
-                       QImage::Format_RGB32,
-                       [](void* p) { delete static_cast<BufRef*>(p); },
-                       keepAlive);
-            emit frameReady(img);
+        if (frames.empty()) return;
+
+        // Drop everything but the latest frame in this batch — older ones
+        // are already stale by the time GUI gets around to painting.
+        auto& f = frames.back();
+
+        // GUI backpressure: if the previous emitted frame hasn't been
+        // painted yet, drop this one too. Without this, when GUI paint
+        // (drawImage at 4K) takes 30-40ms but network delivers a frame
+        // every 33ms, the Qt event queue fills with stale frames and
+        // click-to-display latency creeps up to a full second.
+        if (framePending_.exchange(true, std::memory_order_acq_rel)) {
+            return;
         }
+
+        using BufRef = std::shared_ptr<std::vector<std::uint8_t>>;
+        auto* keepAlive = new BufRef(f.pixels);
+        QImage img(f.pixels->data(), f.width, f.height, f.rowBytes,
+                   QImage::Format_RGB32,
+                   [](void* p) { delete static_cast<BufRef*>(p); },
+                   keepAlive);
+        emit frameReady(img);
     };
     cb.onDisconnect = [this]() {};
 
@@ -132,6 +142,10 @@ void ViewerSession::sendMouseButton(std::uint8_t button, bool down) {
     std::uint8_t pl[2] = { button, static_cast<std::uint8_t>(down ? 1 : 0) };
     std::string err;
     client_.SendInput(proto::MsgMouseButton, pl, sizeof(pl), &err);
+}
+
+void ViewerSession::onFramePainted() {
+    framePending_.store(false, std::memory_order_release);
 }
 
 void ViewerSession::sendKey(std::uint16_t vk, bool down) {

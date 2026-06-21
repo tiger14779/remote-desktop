@@ -28,14 +28,21 @@ QRect VideoWidget::videoTarget() const {
 }
 
 void VideoWidget::paintEvent(QPaintEvent*) {
-    QPainter p(this);
-    p.fillRect(rect(), Qt::black);
-    if (current_.isNull()) return;
-    // SmoothPixmapTransform on: bilinear downscale. Without it, downscaling a
-    // 4K source to a 1280x720 window does nearest-neighbour and text turns
-    // crunchy. With it, text edges stay legible at the cost of some CPU.
-    p.setRenderHint(QPainter::SmoothPixmapTransform, true);
-    p.drawImage(videoTarget(), current_);
+    {
+        QPainter p(this);
+        p.fillRect(rect(), Qt::black);
+        if (!current_.isNull()) {
+            // SmoothPixmapTransform on: bilinear downscale. Without it,
+            // downscaling a 4K source to a 1280x720 window does
+            // nearest-neighbour and text turns crunchy. With it, text edges
+            // stay legible at the cost of some CPU.
+            p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+            p.drawImage(videoTarget(), current_);
+        }
+    }
+    // Outside the QPainter scope so the GPU/CPU work has actually finished
+    // before we tell the upstream "I'm done, send me the next frame".
+    emit framePainted();
 }
 
 bool VideoWidget::mapToNormalized(QPoint widgetPos,

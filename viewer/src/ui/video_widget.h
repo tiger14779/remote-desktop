@@ -31,6 +31,10 @@ signals:
     void inputMouseButton(std::uint8_t button, bool down);
     void inputKey(std::uint16_t vkCode, bool down);
 
+    // Emitted at the end of paintEvent. ViewerSession listens to this so it
+    // knows GUI has caught up and another decoded frame is allowed through.
+    void framePainted();
+
 protected:
     void paintEvent(QPaintEvent*) override;
     void mouseMoveEvent(QMouseEvent* e) override;

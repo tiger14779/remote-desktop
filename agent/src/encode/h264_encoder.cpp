@@ -33,11 +33,20 @@ std::string avErr(const std::string& what, int err) {
 void applyLowLatencyTuning(AVCodecContext* ctx, const char* encoderName) {
     const std::string name = encoderName;
     if (name == "libx264") {
-        av_opt_set(ctx->priv_data, "preset", "fast", 0);          // not ultrafast — too lossy for text
+        // superfast keeps CABAC + 8x8 transform (sharp text), but cuts motion
+        // estimation cost enough that 4K @ 30fps fits in real-time on a mid
+        // tier CPU. "fast" was too heavy — encode latency was alone busting
+        // the 33ms frame budget on user-reported hardware, which queued up
+        // into ~1s of click-to-display lag.
+        av_opt_set(ctx->priv_data, "preset", "superfast", 0);
         av_opt_set(ctx->priv_data, "tune", "zerolatency", 0);
-        av_opt_set(ctx->priv_data, "profile", "high", 0);         // high profile = CABAC + 8x8 transform = sharper text
+        av_opt_set(ctx->priv_data, "profile", "high", 0);
+        // sliced-threads + sync-lookahead=0 + rc-lookahead=0 keep the
+        // pipeline depth at 1 frame; without these, x264's threading model
+        // can still buffer a few frames internally even with zerolatency.
         av_opt_set(ctx->priv_data, "x264-params",
-                   "scenecut=0:repeat-headers=1:intra-refresh=1:ref=1:bframes=0", 0);
+                   "scenecut=0:repeat-headers=1:intra-refresh=1:ref=1:bframes=0"
+                   ":sliced-threads=1:sync-lookahead=0:rc-lookahead=0", 0);
     } else if (name == "h264_nvenc") {
         av_opt_set(ctx->priv_data, "preset", "p4", 0);
         av_opt_set(ctx->priv_data, "tune", "ll", 0);

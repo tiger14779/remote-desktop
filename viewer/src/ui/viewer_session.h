@@ -39,6 +39,11 @@ public:
     void sendMouseButton(std::uint8_t button, bool down);
     void sendKey(std::uint16_t vkCode, bool down);
 
+    // Called on the GUI thread by VideoWidget after paintEvent finishes.
+    // Just clears the framePending_ flag so the next decoded frame is
+    // allowed through. Direct-connected so it's a cheap atomic flip.
+    void onFramePainted();
+
 public slots:
     void start(Config cfg);
 
@@ -59,6 +64,12 @@ private:
     // Used by requestStop() to wake the reconnect-backoff sleep.
     std::mutex stopMu_;
     std::condition_variable stopCv_;
+
+    // GUI backpressure. Network thread sets true before emit, GUI thread
+    // clears it in onFramePainted. If true when a new frame is decoded,
+    // we drop that frame instead of queueing it — prevents Qt's signal
+    // queue from accumulating frames when paintEvent at 4K can't keep up.
+    std::atomic<bool> framePending_{false};
 };
 
 Q_DECLARE_METATYPE(ViewerSession::Config)

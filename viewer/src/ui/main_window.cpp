@@ -37,6 +37,13 @@ MainWindow::MainWindow(const ViewerSession::Config& cfg, QWidget* parent)
     connect(session_.data(), &ViewerSession::disconnected,
             this, &MainWindow::onDisconnected, Qt::QueuedConnection);
 
+    // GUI backpressure feedback: VideoWidget tells ViewerSession every time
+    // a paintEvent finishes. ViewerSession uses this to gate emit so the
+    // signal queue can never accumulate stale frames. DirectConnection: the
+    // slot is a single atomic store, runs synchronously on the GUI thread.
+    connect(video_, &VideoWidget::framePainted,
+            session_.data(), &ViewerSession::onFramePainted, Qt::DirectConnection);
+
     // Input: VideoWidget emits on GUI thread → forward to ViewerSession's
     // thread-safe send methods directly (no Qt::QueuedConnection — the
     // worker thread is blocked inside Run() and would never drain a queue).
