@@ -1,0 +1,112 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Relay: run (go run ./cmd/relay)",
+            "detail": "Foreground Go relay on :7100 with config.production.json. Ctrl+C in the terminal to stop.",
+            "type": "shell",
+            "command": "go",
+            "args": [
+                "run",
+                "./cmd/relay",
+                "-listen", ":7100",
+                "-config", "deploy/config.production.json"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/relay"
+            },
+            "isBackground": true,
+            "presentation": {
+                "panel": "dedicated",
+                "reveal": "always",
+                "clear": false,
+                "echo": true,
+                "showReuseMessage": false,
+                "group": "runtime"
+            },
+            "problemMatcher": {
+                "owner": "go",
+                "pattern": {
+                    "regexp": "^([^:]+):(\\d+):(\\d+):\\s+(.*)$",
+                    "file": 1, "line": 2, "column": 3, "message": 4
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": ".*relay listening.*",
+                    "endsPattern": ".*relay listening on.*"
+                }
+            },
+            "runOptions": {
+                "instanceLimit": 1
+            }
+        },
+        {
+            "label": "App: build (Release)",
+            "detail": "cmake --build app/build --config Release. Re-runs CMake configure if app/build doesn't exist yet.",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-Command",
+                "if (-not (Test-Path 'app/build/CMakeCache.txt')) { cmake -S app -B app/build -G 'Visual Studio 18 2026' -A x64 }; cmake --build app/build --config Release"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "VCPKG_ROOT": "E:\\Development_environment\\vcpkg",
+                    "QT_DIR": "E:\\Development_environment\\qt\\6.7.3\\msvc2022_64"
+                }
+            },
+            "presentation": {
+                "panel": "shared",
+                "reveal": "always",
+                "clear": true,
+                "group": "build"
+            },
+            "problemMatcher": "$msCompile",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "App: run (no rebuild)",
+            "detail": "Launch app/build/Release/remote-desktop.exe. Closes when you close the window.",
+            "type": "shell",
+            "command": "${workspaceFolder}/app/build/Release/remote-desktop.exe",
+            "options": {
+                "cwd": "${workspaceFolder}/app/build/Release"
+            },
+            "isBackground": true,
+            "presentation": {
+                "panel": "dedicated",
+                "reveal": "silent",
+                "showReuseMessage": false,
+                "group": "runtime"
+            },
+            "problemMatcher": [],
+            "runOptions": {
+                "instanceLimit": 1
+            }
+        },
+        {
+            "label": "App: build + run",
+            "detail": "Compile app then launch it. The default dev iteration step.",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "App: build (Release)",
+                "App: run (no rebuild)"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "Dev: relay + app (split terminals)",
+            "detail": "Start relay AND app together, each in its own VS Code terminal panel.",
+            "dependsOn": [
+                "Relay: run (go run ./cmd/relay)",
+                "App: build + run"
+            ],
+            "problemMatcher": []
+        }
+    ]
+}

@@ -28,7 +28,10 @@ capture.bmp
 
 # IDE / editor files
 .vs/
-.vscode/
+.vscode/*
+# ... except shared task / launch configs that everyone benefits from
+!.vscode/tasks.json
+!.vscode/launch.json
 .idea/
 *.user
 *.suo
