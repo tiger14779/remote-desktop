@@ -40,3 +40,11 @@ CMakeFiles/
 # OS
 Thumbs.db
 .DS_Store
+
+# Synology Drive conflict markers when files were edited on two machines
+*_Conflict.cpp
+*_Conflict.h
+*_Conflict.txt
+*_Conflict.md
+*_Conflict.json
+*_DESKTOP-*
