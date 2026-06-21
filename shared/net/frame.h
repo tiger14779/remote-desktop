@@ -1,8 +1,12 @@
 #pragma once
 
-// C++ mirror of relay/internal/protocol — viewer side. Same wire format as
-// agent/src/net/frame.h; only the JSON encoders differ (AUTH/CONNECT instead
-// of REGISTER).
+// Wire protocol shared by agent, viewer, and the unified app. Frame layout:
+//
+//   [1 byte type] [4 byte big-endian length] [payload bytes]
+//
+// All MessageType constants and the byte-level Read/Write/Parse helpers live
+// here so both connection sides (Agent → REGISTER, Viewer → AUTH + CONNECT)
+// can be linked into a single binary without duplicate-symbol issues.
 
 #include "net/tcp_client.h"
 
@@ -61,11 +65,17 @@ bool WriteFrame(TcpClient& c, std::uint8_t type,
                 const std::uint8_t* payload, std::size_t payloadSize,
                 std::string* errOut);
 
+// JSON encoders — both sides live here so a single exe can link both
+// connection paths without symbol collisions on a "proto" namespace.
+std::string EncodeRegisterPayload(const std::string& deviceId,
+                                  const std::string& deviceToken);
+
 std::string EncodeAuthPayload(const std::string& account,
                               const std::string& sessionToken);
 
 std::string EncodeConnectPayload(const std::string& deviceId);
 
+// Parse a generic Response JSON ({"ok":bool,"message":string}).
 bool ParseResponseJSON(const std::uint8_t* data, std::size_t size,
                        bool* ok, std::string* message);
 

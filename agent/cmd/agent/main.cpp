@@ -11,7 +11,7 @@
 #include "encode/h264_encoder.h"
 #include "input/input_injector.h"
 #include "net/frame.h"
-#include "net/relay_client.h"
+#include "net/agent_relay_client.h"
 
 #include <atomic>
 #include <chrono>

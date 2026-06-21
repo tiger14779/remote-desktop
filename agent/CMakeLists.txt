@@ -30,15 +30,22 @@ endif()
 message(STATUS "FFmpeg root: ${FFMPEG_ROOT}")
 
 # ---------------------------------------------------------------------------
-# agent_core: capture + encode + utilities (no networking yet)
+# Shared net library (TcpClient + frame protocol). Lives next door so both
+# agent and viewer can pull it in without duplicating files. Add it once at
+# the top level (skip if already added by parent CMakeLists, e.g. app/).
+# ---------------------------------------------------------------------------
+if(NOT TARGET shared_net)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../shared" shared_build)
+endif()
+
+# ---------------------------------------------------------------------------
+# agent_core: capture + encode + agent-specific relay client + utilities
 # ---------------------------------------------------------------------------
 add_library(agent_core STATIC
     src/capture/dxgi_capturer.cpp
     src/encode/h264_encoder.cpp
     src/input/input_injector.cpp
-    src/net/tcp_client.cpp
-    src/net/frame.cpp
-    src/net/relay_client.cpp
+    src/net/agent_relay_client.cpp
     src/util/bmp_writer.cpp
 )
 target_include_directories(agent_core
@@ -49,6 +56,7 @@ target_include_directories(agent_core
 target_include_directories(agent_core SYSTEM PUBLIC "${FFMPEG_ROOT}/include")
 target_link_directories(agent_core PUBLIC "${FFMPEG_ROOT}/lib")
 target_link_libraries(agent_core PUBLIC
+    shared_net
     d3d11 dxgi dxguid
     avcodec avutil swscale
 )

@@ -1,6 +1,3 @@
-// NOTE: this file is a verbatim copy of agent/src/net/tcp_client.cpp. Keep
-// them in sync; when a third consumer appears, lift into a shared library.
-
 #include "net/tcp_client.h"
 
 #include <winsock2.h>
@@ -66,6 +63,8 @@ bool TcpClient::Connect(const std::string& host, int port, std::string* errorOut
         return false;
     }
 
+    // TCP_NODELAY: video frames are bursty and small control frames must not
+    // sit in Nagle's buffer waiting for company.
     BOOL one = TRUE;
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&one), sizeof(one));
 

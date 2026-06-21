@@ -62,6 +62,7 @@ bool WriteFrame(TcpClient& c, std::uint8_t type,
     header[0] = type;
     writeBE32(header + 1, static_cast<std::uint32_t>(payloadSize));
 
+    // Glue header + payload into a single send() to avoid an extra TCP segment.
     std::vector<std::uint8_t> buf;
     buf.reserve(kHeaderSize + payloadSize);
     buf.insert(buf.end(), header, header + kHeaderSize);
@@ -69,6 +70,14 @@ bool WriteFrame(TcpClient& c, std::uint8_t type,
         buf.insert(buf.end(), payload, payload + payloadSize);
     }
     return c.WriteAll(buf.data(), buf.size(), errOut);
+}
+
+std::string EncodeRegisterPayload(const std::string& deviceId,
+                                  const std::string& deviceToken) {
+    std::ostringstream oss;
+    oss << "{\"device_id\":\"" << jsonEscape(deviceId)
+        << "\",\"device_token\":\"" << jsonEscape(deviceToken) << "\"}";
+    return oss.str();
 }
 
 std::string EncodeAuthPayload(const std::string& account,

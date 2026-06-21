@@ -35,18 +35,23 @@ qt_standard_project_setup()
 message(STATUS "Qt6 ${Qt6_VERSION} at ${Qt6_DIR}")
 
 # ---------------------------------------------------------------------------
-# viewer_core: pure C++, no Qt — net + decode + utilities. Keeps tests cheap.
+# Shared net library (TcpClient + frame protocol). Same lib as agent uses.
+# ---------------------------------------------------------------------------
+if(NOT TARGET shared_net)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../shared" shared_build)
+endif()
+
+# ---------------------------------------------------------------------------
+# viewer_core: pure C++, no Qt — viewer-side relay client + decode.
 # ---------------------------------------------------------------------------
 add_library(viewer_core STATIC
     src/decode/h264_decoder.cpp
-    src/net/tcp_client.cpp
-    src/net/frame.cpp
     src/net/relay_client.cpp
 )
 target_include_directories(viewer_core PUBLIC src)
 target_include_directories(viewer_core SYSTEM PUBLIC "${FFMPEG_ROOT}/include")
 target_link_directories(viewer_core PUBLIC "${FFMPEG_ROOT}/lib")
-target_link_libraries(viewer_core PUBLIC avcodec avutil swscale)
+target_link_libraries(viewer_core PUBLIC shared_net avcodec avutil swscale)
 if(MSVC)
     target_compile_options(viewer_core PUBLIC /W4 /permissive- /Zc:__cplusplus /utf-8)
 endif()
