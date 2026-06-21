@@ -5,7 +5,11 @@
 #include <QThread>
 
 #include <atomic>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
+
+class RelayClient;
 
 // Always-on background "I can be controlled" side of the app. Owns its own
 // thread, connects to the relay as an Agent device, and on SESSION_START
@@ -43,4 +47,17 @@ private:
     QThread workerThread_;
     std::atomic<bool> shouldExit_{false};
     Config cfg_;
+
+    // Pointer to the currently-active relay client (lives on the stack of
+    // an in-flight runLoop iteration). stop() closes it from the GUI thread
+    // to wake the worker out of its blocking ReadFrame. Mutex covers both
+    // the pointer swap inside runLoop and the close call from outside.
+    std::mutex clientMu_;
+    RelayClient* activeClient_ = nullptr;
+
+    // Interruptible backoff sleep — stop() notifies this so retry-in-Ns
+    // doesn't keep the worker alive for tens of seconds while the GUI is
+    // waiting to close.
+    std::mutex wakeMu_;
+    std::condition_variable wakeCv_;
 };

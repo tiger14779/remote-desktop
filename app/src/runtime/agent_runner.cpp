@@ -172,6 +172,18 @@ void AgentRunner::start(const Config& cfg) {
 
 void AgentRunner::stop() {
     shouldExit_ = true;
+
+    // Wake the worker if it's currently blocked in a backoff sleep.
+    wakeCv_.notify_all();
+
+    // If the worker is currently inside RelayClient::Run() (blocking on
+    // ReadFull), it won't notice shouldExit_ on its own. Closing the socket
+    // is what unblocks ReadFull and lets runLoop unwind cleanly.
+    {
+        std::lock_guard<std::mutex> g(clientMu_);
+        if (activeClient_) activeClient_->Close();
+    }
+
     if (workerThread_.isRunning()) {
         workerThread_.quit();
         workerThread_.wait();
@@ -191,6 +203,12 @@ void AgentRunner::runLoop(Config cfg) {
     int backoffSec = 1;
     constexpr int kMaxBackoffSec = 30;
 
+    auto sleepOrExit = [this](int seconds) {
+        std::unique_lock<std::mutex> lock(wakeMu_);
+        wakeCv_.wait_for(lock, std::chrono::seconds(seconds),
+                          [this]() { return shouldExit_.load(); });
+    };
+
     while (!shouldExit_.load()) {
         RelayClient client;
         RelayClient::Config rc;
@@ -205,13 +223,23 @@ void AgentRunner::runLoop(Config cfg) {
         if (!client.ConnectAndRegister(rc, &err)) {
             emit status(QStringLiteral("relay: %1 — retry in %2s")
                             .arg(QString::fromStdString(err)).arg(backoffSec));
-            std::this_thread::sleep_for(std::chrono::seconds(backoffSec));
+            sleepOrExit(backoffSec);
+            if (shouldExit_.load()) break;
             backoffSec = std::min(backoffSec * 2, kMaxBackoffSec);
             continue;
         }
         emit status(QStringLiteral("online — others can connect to %1")
                         .arg(cfg.deviceId));
         backoffSec = 1;
+
+        // Publish the active client so stop() on the GUI thread can close
+        // the socket out from under Run() and we unwind cleanly. Cleared
+        // again before tearing down so a delayed stop() can't dereference a
+        // dead stack frame.
+        {
+            std::lock_guard<std::mutex> g(clientMu_);
+            activeClient_ = &client;
+        }
 
         StreamPump pump(&cap, &client, cfg.fps, cfg.bitrateKbps, cfg.maxHeight);
         pump.Start();
@@ -244,6 +272,11 @@ void AgentRunner::runLoop(Config cfg) {
         };
         client.Run(cb);
 
+        {
+            std::lock_guard<std::mutex> g(clientMu_);
+            activeClient_ = nullptr;
+        }
+
         hbStop.store(true);
         hb.join();
         pump.Stop();
@@ -252,7 +285,8 @@ void AgentRunner::runLoop(Config cfg) {
         if (shouldExit_.load()) break;
         emit status(QStringLiteral("disconnected — reconnecting in %1s")
                         .arg(backoffSec));
-        std::this_thread::sleep_for(std::chrono::seconds(backoffSec));
+        sleepOrExit(backoffSec);
+        if (shouldExit_.load()) break;
         backoffSec = std::min(backoffSec * 2, kMaxBackoffSec);
     }
 
