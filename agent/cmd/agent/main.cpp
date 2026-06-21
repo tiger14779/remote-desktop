@@ -262,8 +262,28 @@ private:
 } // namespace
 
 int main(int argc, char** argv) {
+    // Make std::cout flush per-write. PowerShell pipes a native process's
+    // stdout through itself, which Windows libc treats as "fully buffered"
+    // (no flush until 4 KB or exit). Without this, status messages can
+    // pile up invisibly while the user thinks the agent is hung.
+    std::cout.setf(std::ios::unitbuf);
+
     Flags flags;
     if (!parseFlags(argc, argv, &flags)) return 1;
+
+    // Echo the resolved config to stderr right away — cerr is unbuffered,
+    // so this is the FIRST thing the operator sees regardless of buffering.
+    // Catches "I pasted with backticks into cmd instead of PowerShell and
+    // got the wrong defaults" before it wastes 30s of confusion.
+    std::cerr << "[agent] starting"
+              << " relay=" << flags.relay
+              << " device-id=" << flags.deviceId
+              << " token=" << (flags.deviceToken.size() > 8
+                                   ? flags.deviceToken.substr(0, 8) + "..."
+                                   : flags.deviceToken)
+              << " fps=" << flags.fps
+              << " bitrate=" << flags.bitrateKbps << "kbps"
+              << " max-height=" << flags.maxHeight << "\n";
 
     std::string host;
     int port = 0;
@@ -292,14 +312,15 @@ int main(int argc, char** argv) {
         rc.port = port;
         rc.deviceId = flags.deviceId;
         rc.deviceToken = flags.deviceToken;
+        std::cerr << "[agent] dialing " << host << ":" << port << "...\n";
         if (!client.ConnectAndRegister(rc, &err)) {
-            std::cerr << "relay: " << err << " — retrying in "
+            std::cerr << "[agent] relay: " << err << " — retrying in "
                       << backoffSec << "s\n";
             std::this_thread::sleep_for(std::chrono::seconds(backoffSec));
             backoffSec = std::min(backoffSec * 2, kMaxBackoffSec);
             continue;
         }
-        std::cout << "registered with relay as " << flags.deviceId
+        std::cerr << "[agent] registered as " << flags.deviceId
                   << ", waiting for session\n";
         backoffSec = 1; // reset backoff after a successful connect
 
