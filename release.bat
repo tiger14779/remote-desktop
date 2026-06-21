@@ -88,6 +88,17 @@ REM FFmpeg + transitive deps were copied to the build dir by CMake's POST_BUILD.
 for %%f in ("%AGENT_BUILD%\*.dll") do copy /y "%%f" "%AGENT_STAGE%\" >nul
 copy /y "%ROOT%\agent\README.md"         "%AGENT_STAGE%\README.md" >nul
 
+REM Critical-DLL check: CMake's POST_BUILD copy_directory has been seen to
+REM silently miss avcodec/avutil/swscale when build/Release was locked at
+REM the time of an earlier build. Catch it here instead of at the customer.
+for %%d in (avcodec-61.dll avutil-59.dll swscale-8.dll swresample-5.dll libx264-164.dll vcruntime140.dll) do (
+    if not exist "%AGENT_STAGE%\%%d" (
+        echo [release] missing critical DLL in agent stage: %%d >&2
+        echo            ^(rerun cmake --build agent or copy from vcpkg bin^) >&2
+        goto :fail
+    )
+)
+
 REM ---- Stage viewer (Qt + FFmpeg + plugin subdirs) --------------------------
 echo === Staging viewer ===
 set "VIEWER_BUILD=%ROOT%\viewer\build\Release"
