@@ -86,6 +86,16 @@ add_custom_command(TARGET viewer POST_BUILD
     COMMENT "Running windeployqt to bundle Qt runtime"
 )
 
+# Bundle MSVC runtime so viewer.exe runs on a fresh box without vc_redist.
+set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
+include(InstallRequiredSystemLibraries)
+foreach(_msvc_lib ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS})
+    add_custom_command(TARGET viewer POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_msvc_lib}" "$<TARGET_FILE_DIR:viewer>"
+    )
+endforeach()
+
 # decode_test ends up in the same Release dir as viewer, so it picks up the
 # FFmpeg DLLs from viewer's POST_BUILD copy. We deliberately do NOT add the
 # same POST_BUILD to decode_test — when /m parallel build is on, two targets

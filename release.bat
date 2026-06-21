@@ -17,9 +17,9 @@ setlocal EnableDelayedExpansion
 
 REM ---- Resolve VERSION ------------------------------------------------------
 if "%~1"=="" (
-    REM %date% format depends on locale; try the ISO-ish slice first, fall back
-    REM to a timestamp call. Both produce e.g. dev-20260617.
-    set "TODAY=%date:~0,4%%date:~5,2%%date:~8,2%"
+    REM Locale-independent date. cmd's %date% includes the weekday name in
+    REM Chinese / French / etc., which would break a simple slice.
+    for /f "usebackq" %%i in (`powershell -nologo -noprofile -command "Get-Date -Format yyyyMMdd"`) do set "TODAY=%%i"
     set "VERSION=dev-!TODAY!"
 ) else (
     set "VERSION=%~1"

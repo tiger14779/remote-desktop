@@ -77,3 +77,16 @@ add_custom_command(TARGET agent POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${FFMPEG_ROOT}/bin" "$<TARGET_FILE_DIR:agent>"
 )
+
+# Bundle the MSVC runtime DLLs (VCRUNTIME140.dll, MSVCP140.dll, etc.) so
+# agent.exe runs on a fresh Windows box that doesn't have vc_redist
+# installed. Skips the implicit `install()` rule — we only want the var
+# populated so we can copy.
+set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
+include(InstallRequiredSystemLibraries)
+foreach(_msvc_lib ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS})
+    add_custom_command(TARGET agent POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_msvc_lib}" "$<TARGET_FILE_DIR:agent>"
+    )
+endforeach()
