@@ -59,21 +59,14 @@ if(MSVC)
     target_compile_options(app PRIVATE /W4 /permissive- /Zc:__cplusplus /utf-8)
 endif()
 
-# Runtime bundling — same pattern as viewer's: FFmpeg + Qt + MSVC.
-add_custom_command(TARGET app POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${FFMPEG_ROOT}/bin" "$<TARGET_FILE_DIR:app>"
-)
-
-# windeployqt is intentionally NOT run as POST_BUILD here: its warnings
-# (e.g. "Cannot find dxcompiler.dll") get treated as errors by MSBuild's
-# exec wrapper, and trying to swallow them via `cmd /c ... & exit /b 0`
-# fails because CMake's quoting mangles the inner cmd line. release.bat
-# runs windeployqt on the staged copy, where this isn't a problem.
-# For local dev, run once manually:
-#   "%QT_DIR%\bin\windeployqt.exe" --no-translations --no-system-d3d-compiler --no-opengl-sw build\Release\remote-desktop.exe
-
-# MSVC runtime bundling is done by viewer's POST_BUILD which runs first into
-# the same parent build/Release dir; if we duplicate it on app/ too the
-# parallel msbuild copies race and exit non-zero on Windows. release.bat is
-# the place to make sure both binaries get the runtime DLLs at packaging time.
+# Runtime DLL staging is INTENTIONALLY done outside CMake — by the
+# VS Code task "App: bundle runtime" (or by release.bat at packaging time).
+#
+# Why not POST_BUILD? POST_BUILD only fires when the target relinks. On an
+# incremental build where remote-desktop.exe is already up to date, MSBuild
+# skips link AND skips POST_BUILD — leaving stale or missing DLLs next to
+# a current .exe. The dev cycle then looks "succeeded" but launching the
+# exe fails with "找不到 avutil-59.dll".
+#
+# app/scripts/bundle_runtime.ps1 always runs and is what the VS Code task
+# (and any future release.bat refresh) calls.

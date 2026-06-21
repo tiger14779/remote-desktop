@@ -65,8 +65,8 @@
             "problemMatcher": []
         },
         {
-            "label": "App: build (Release)",
-            "detail": "Default build (Ctrl+Shift+B). Runs configure first, then cmake --build. -- /m for parallel jobs.",
+            "label": "App: compile (cmake --build)",
+            "detail": "Pure cmake --build. Does NOT stage runtime DLLs — use 'App: build (Release)' for the full thing.",
             "type": "shell",
             "command": "cmake",
             "args": [
@@ -84,7 +84,41 @@
                 "group": "build"
             },
             "dependsOn": ["App: configure"],
-            "problemMatcher": "$msCompile",
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "App: bundle runtime (DLLs + windeployqt)",
+            "detail": "Copy FFmpeg DLLs, run windeployqt, copy MSVC runtime into app/build/Release. Always runs (unlike CMake POST_BUILD which skips on incremental builds).",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-File", "${workspaceFolder}/app/scripts/bundle_runtime.ps1",
+                "-OutputDir", "${workspaceFolder}/app/build/Release",
+                "-FfmpegBin", "E:/Development_environment/vcpkg/installed/x64-windows/bin",
+                "-QtBin", "E:/Development_environment/qt/6.7.3/msvc2022_64/bin"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "panel": "shared",
+                "reveal": "always",
+                "clear": false,
+                "group": "build"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "App: build (Release)",
+            "detail": "Default Ctrl+Shift+B. Configure → compile → bundle runtime DLLs. After this remote-desktop.exe is launch-ready.",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "App: compile (cmake --build)",
+                "App: bundle runtime (DLLs + windeployqt)"
+            ],
+            "problemMatcher": [],
             "group": {
                 "kind": "build",
                 "isDefault": true
@@ -92,7 +126,7 @@
         },
         {
             "label": "App: clean (rm -rf app/build)",
-            "detail": "Wipe app/build entirely. Use when cmake's cache has gone stale (empty FFMPEG_ROOT in vcxproj POST_BUILD, etc.).",
+            "detail": "Wipe app/build entirely. Use when cmake's cache has gone stale.",
             "type": "shell",
             "command": "powershell",
             "args": [
@@ -132,7 +166,7 @@
         },
         {
             "label": "App: build + run",
-            "detail": "Compile app then launch it. The actual daily iteration step.",
+            "detail": "Compile + bundle DLLs + launch. The actual daily iteration step.",
             "dependsOrder": "sequence",
             "dependsOn": [
                 "App: build (Release)",
