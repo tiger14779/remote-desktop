@@ -186,6 +186,14 @@ private:
             return;
         }
         bool wasIdle = false;
+        auto lastGotFrame = std::chrono::steady_clock::now();
+        // Only mark wasIdle (and force the next frame to IDR) after sustained
+        // silence. Short kTimeout gaps between active frames — like the
+        // mouse-only updates DXGI returns when dragging a window — would
+        // otherwise flap this flag on every other iter and emit a 250+ KB
+        // IDR several times per second, clogging the network and tanking
+        // perceived latency.
+        constexpr auto kIdleThreshold = std::chrono::seconds(1);
 
         // Periodic + per-frame diagnostics. Surfaces the cmd→txt scene
         // change case: a huge encoded frame or a slow encode call is what
@@ -226,11 +234,14 @@ private:
             // (reading docs, editor with no input) the link is silent except
             // for the 5s heartbeat.
             if (!gotNew) {
-                wasIdle = true;
+                if (std::chrono::steady_clock::now() - lastGotFrame > kIdleThreshold) {
+                    wasIdle = true;
+                }
                 continue;
             }
 
             frame = std::move(fresh);
+            lastGotFrame = std::chrono::steady_clock::now();
 
             // First frame coming out of an idle stretch is forced-IDR so any
             // viewer that lost packets during the silence resyncs on this

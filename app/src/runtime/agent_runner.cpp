@@ -109,6 +109,15 @@ private:
         if (!encodeAndSend(enc, frame, pts++, /*forceIdr=*/false,
                            &firstBytes, &err)) return;
         bool wasIdle = false;
+        auto lastGotFrame = std::chrono::steady_clock::now();
+        // Only mark wasIdle (and force an IDR on the next real frame) after
+        // sustained DXGI silence. Without this, dragging a window flapped
+        // wasIdle on every 33ms iter that landed in a "mouse-only" DXGI
+        // gap, which forced an IDR on the very next frame and emitted a
+        // 250–280 KB burst — 5+ IDRs per second, totally trashing the LAN
+        // pipeline. 1 second of silence is plenty to trip the recovery
+        // path; anything shorter is just normal drag jitter.
+        constexpr auto kIdleThreshold = std::chrono::seconds(1);
 
         // Per-frame + per-2s diagnostics. Surfaces "encode too slow" and
         // "scene change emits a giant frame" as the actual lag culprits.
@@ -130,8 +139,14 @@ private:
                 wasIdle = true;
                 continue;
             }
-            if (r != DxgiCapturer::Result::kFrame) { wasIdle = true; continue; }
+            if (r != DxgiCapturer::Result::kFrame) {
+                if (std::chrono::steady_clock::now() - lastGotFrame > kIdleThreshold) {
+                    wasIdle = true;
+                }
+                continue;
+            }
             frame = std::move(fresh);
+            lastGotFrame = std::chrono::steady_clock::now();
 
             const bool forceIdr = wasIdle;
             std::size_t thisBytes = 0;
