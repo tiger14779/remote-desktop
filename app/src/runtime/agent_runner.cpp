@@ -106,8 +106,9 @@ private:
         auto next = std::chrono::steady_clock::now();
         int64_t pts = 0;
         std::size_t firstBytes = 0;
+        long long firstEnc = 0, firstSend = 0;
         if (!encodeAndSend(enc, frame, pts++, /*forceIdr=*/false,
-                           &firstBytes, &err)) return;
+                           &firstBytes, &firstEnc, &firstSend, &err)) return;
         bool wasIdle = false;
         auto lastGotFrame = std::chrono::steady_clock::now();
         // Only mark wasIdle (and force an IDR on the next real frame) after
@@ -119,12 +120,15 @@ private:
         // path; anything shorter is just normal drag jitter.
         constexpr auto kIdleThreshold = std::chrono::seconds(1);
 
-        // Per-frame + per-2s diagnostics. Surfaces "encode too slow" and
-        // "scene change emits a giant frame" as the actual lag culprits.
+        // Per-frame + per-2s diagnostics. encode_ms and send_ms are reported
+        // separately so the operator can tell "encoder is slow on this
+        // machine" from "viewer is reading slow and TCP back-pressured my
+        // send" — they look identical with a combined timer.
         auto statStart = std::chrono::steady_clock::now();
         int statFrames = 0;
         std::size_t statBytes = 0;
-        long long statMaxMs = 0;
+        long long statMaxEnc = 0;
+        long long statMaxSend = 0;
         std::size_t statMaxBytes = 0;
 
         while (sessionActive_) {
@@ -150,35 +154,39 @@ private:
 
             const bool forceIdr = wasIdle;
             std::size_t thisBytes = 0;
-            const auto t0 = std::chrono::steady_clock::now();
-            if (!encodeAndSend(enc, frame, pts++, forceIdr, &thisBytes, &err)) return;
+            long long encMs = 0, sendMs = 0;
+            if (!encodeAndSend(enc, frame, pts++, forceIdr,
+                                &thisBytes, &encMs, &sendMs, &err)) return;
             const auto t1 = std::chrono::steady_clock::now();
-            const long long encMs =
-                std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
             wasIdle = false;
 
-            // Per-frame warning. Scene-change forced IDR + slow encode is
-            // the usual fingerprint for the click-to-display lag spike.
-            if (encMs > 50 || thisBytes > 200 * 1024) {
-                std::cerr << "[stat] heavy frame: " << encMs << "ms, "
-                          << (thisBytes / 1024) << "KB"
+            // Per-frame warning. If encode_ms is the big number, libx264
+            // is the bottleneck on this CPU. If send_ms is big, viewer is
+            // reading slow and TCP back-pressure is what we're seeing.
+            if (encMs > 50 || sendMs > 50 || thisBytes > 200 * 1024) {
+                std::cerr << "[stat] heavy frame: enc=" << encMs << "ms"
+                          << " send=" << sendMs << "ms"
+                          << " " << (thisBytes / 1024) << "KB"
                           << (forceIdr ? " (forced IDR)" : "") << "\n";
             }
             statFrames++;
             statBytes += thisBytes;
-            if (encMs > statMaxMs) statMaxMs = encMs;
+            if (encMs > statMaxEnc) statMaxEnc = encMs;
+            if (sendMs > statMaxSend) statMaxSend = sendMs;
             if (thisBytes > statMaxBytes) statMaxBytes = thisBytes;
             const auto since =
                 std::chrono::duration_cast<std::chrono::seconds>(t1 - statStart).count();
             if (since >= 2) {
                 std::cerr << "[stat] " << statFrames << " frames in " << since
                           << "s, total " << (statBytes / 1024) << "KB"
-                          << ", max-enc " << statMaxMs << "ms"
+                          << ", max-enc " << statMaxEnc << "ms"
+                          << ", max-send " << statMaxSend << "ms"
                           << ", max-frame " << (statMaxBytes / 1024) << "KB\n";
                 statStart = t1;
                 statFrames = 0;
                 statBytes = 0;
-                statMaxMs = 0;
+                statMaxEnc = 0;
+                statMaxSend = 0;
                 statMaxBytes = 0;
             }
         }
@@ -186,16 +194,26 @@ private:
 
     bool encodeAndSend(H264Encoder& enc, const DxgiCapturer::Frame& f,
                        int64_t pts, bool forceIdr,
-                       std::size_t* bytesOut, std::string* err) {
+                       std::size_t* bytesOut,
+                       long long* encodeMsOut,
+                       long long* sendMsOut,
+                       std::string* err) {
         std::vector<std::vector<std::uint8_t>> pkts;
+        const auto t0 = std::chrono::steady_clock::now();
         if (!enc.EncodeFrame(f.pixels.data(), f.rowPitch, pts, forceIdr, &pkts, err)) {
             return false;
         }
+        const auto tEnc = std::chrono::steady_clock::now();
         std::size_t total = 0;
         for (const auto& p : pkts) {
             if (!client_->SendVideoFrame(p.data(), p.size(), err)) return false;
             total += p.size();
         }
+        const auto tSent = std::chrono::steady_clock::now();
+        if (encodeMsOut) *encodeMsOut =
+            std::chrono::duration_cast<std::chrono::milliseconds>(tEnc - t0).count();
+        if (sendMsOut) *sendMsOut =
+            std::chrono::duration_cast<std::chrono::milliseconds>(tSent - tEnc).count();
         if (bytesOut) *bytesOut = total;
         return true;
     }

@@ -173,8 +173,11 @@ AppMainWindow::AppMainWindow(const LocalConfig& localCfg, QWidget* parent)
     // For now reuse the master device token. Future: per-device dynamic
     // registration where the relay accepts an arbitrary deviceId+token.
     rcfg.deviceToken = QString::fromLatin1(kDeviceToken);
-    rcfg.fps = 30;
-    rcfg.bitrateKbps = 8000;
+    // 60 fps so dragging actually feels smooth (30 fps drag is fundamentally
+    // stuttery, regardless of latency). Bitrate scaled up to give the
+    // encoder enough budget per frame at the new cadence.
+    rcfg.fps = 60;
+    rcfg.bitrateKbps = 12000;
     rcfg.maxHeight = 1440;
     connect(&agent_, &AgentRunner::status, this,
             &AppMainWindow::onAgentStatus, Qt::QueuedConnection);
