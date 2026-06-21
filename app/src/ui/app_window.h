@@ -8,6 +8,7 @@
 
 class QLabel;
 class QLineEdit;
+class QPlainTextEdit;
 class QPushButton;
 
 // RustDesk-style single window. Always runs the AgentRunner in the
@@ -26,8 +27,11 @@ private slots:
     void copyToClipboard(QLineEdit* src);
     void onConnectClicked();
     void onAgentStatus(const QString& s);
+    void onLogLine(const QString& s);
 
 private:
+    void appendLog(const QString& s);
+
     LocalConfig local_;
     AgentRunner agent_;
 
@@ -38,4 +42,6 @@ private:
     QLineEdit* remoteIdField_ = nullptr;
     QLineEdit* remoteCodeField_ = nullptr;
     QPushButton* connectButton_ = nullptr;
+
+    QPlainTextEdit* logView_ = nullptr;
 };

@@ -1,5 +1,7 @@
 #include "ui/app_window.h"
 
+#include "runtime/log_sink.h"
+
 // Viewer's MainWindow class lives at viewer/src/ui/main_window.h; that path
 // is on our include search list via app/CMakeLists.
 #include "ui/main_window.h"
@@ -8,12 +10,16 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QCloseEvent>
+#include <QDateTime>
+#include <QFontDatabase>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QPlainTextEdit>
 #include <QPushButton>
+#include <QScrollBar>
 #include <QStatusBar>
 #include <QVBoxLayout>
 
@@ -119,9 +125,45 @@ AppMainWindow::AppMainWindow(const LocalConfig& localCfg, QWidget* parent)
         root->addWidget(g);
     }
 
-    root->addStretch(1);
+    // === Log section =====================================================
+    {
+        auto* g = new QGroupBox(QStringLiteral("日志 (可复制发给作者排查问题)"));
+        auto* gl = new QVBoxLayout(g);
+
+        logView_ = new QPlainTextEdit;
+        logView_->setReadOnly(true);
+        logView_->setMaximumBlockCount(5000); // cap memory; old lines drop off
+        logView_->setLineWrapMode(QPlainTextEdit::NoWrap);
+        QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+        mono.setPointSize(mono.pointSize() - 1);
+        logView_->setFont(mono);
+        logView_->setMinimumHeight(180);
+        gl->addWidget(logView_, 1);
+
+        auto* btnRow = new QHBoxLayout;
+        btnRow->addStretch(1);
+        auto* copyBtn = new QPushButton(QStringLiteral("复制全部"));
+        auto* clearBtn = new QPushButton(QStringLiteral("清空"));
+        btnRow->addWidget(copyBtn);
+        btnRow->addWidget(clearBtn);
+        gl->addLayout(btnRow);
+
+        connect(copyBtn, &QPushButton::clicked, this, [this]() {
+            QApplication::clipboard()->setText(logView_->toPlainText());
+        });
+        connect(clearBtn, &QPushButton::clicked, logView_, &QPlainTextEdit::clear);
+
+        root->addWidget(g, 1);  // log section takes any extra vertical space
+    }
+
     setCentralWidget(central);
-    setMinimumWidth(420);
+    setMinimumSize(480, 640);
+
+    // Subscribe to the global log sink (installed in main() before us).
+    // Anything anyone writes to std::cerr or std::cout ends up here, plus
+    // any structured status updates from AgentRunner.
+    connect(LogSink::instance(), &LogSink::line,
+            this, &AppMainWindow::onLogLine, Qt::QueuedConnection);
 
     // Spin up the always-on agent connection.
     AgentRunner::Config rcfg;
@@ -136,6 +178,9 @@ AppMainWindow::AppMainWindow(const LocalConfig& localCfg, QWidget* parent)
     rcfg.maxHeight = 1440;
     connect(&agent_, &AgentRunner::status, this,
             &AppMainWindow::onAgentStatus, Qt::QueuedConnection);
+
+    appendLog(QStringLiteral("app started — local id=%1 code=%2")
+                  .arg(local_.deviceId, local_.verifyCode));
     agent_.start(rcfg);
 }
 
@@ -152,6 +197,19 @@ void AppMainWindow::copyToClipboard(QLineEdit* src) {
 
 void AppMainWindow::onAgentStatus(const QString& s) {
     statusLabel_->setText(s);
+    appendLog(QStringLiteral("[agent] ") + s);
+}
+
+void AppMainWindow::onLogLine(const QString& s) {
+    appendLog(s);
+}
+
+void AppMainWindow::appendLog(const QString& s) {
+    const QString ts = QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss"));
+    logView_->appendPlainText(QStringLiteral("[%1] %2").arg(ts, s));
+    // Auto-scroll to bottom so the latest line is always visible.
+    QScrollBar* sb = logView_->verticalScrollBar();
+    sb->setValue(sb->maximum());
 }
 
 void AppMainWindow::onConnectClicked() {
@@ -161,6 +219,7 @@ void AppMainWindow::onConnectClicked() {
                              QStringLiteral("请输入远程 ID"));
         return;
     }
+    appendLog(QStringLiteral("connecting to remote id=%1").arg(remoteId));
     // verifyCode is recorded for the operator's mental model but the MVP
     // relay still verifies via the master session_token. T2-7 onwards
     // wires per-target verification.

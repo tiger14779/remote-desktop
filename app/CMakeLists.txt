@@ -32,6 +32,7 @@ qt_add_executable(app
     cmd/app/main.cpp
     src/ui/app_window.cpp
     src/runtime/local_config.cpp
+    src/runtime/log_sink.cpp
     src/runtime/agent_runner.cpp
 )
 target_include_directories(app PRIVATE src)
