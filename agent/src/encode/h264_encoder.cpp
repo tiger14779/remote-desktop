@@ -8,6 +8,7 @@ extern "C" {
 }
 
 #include <array>
+#include <cstdio>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -41,12 +42,29 @@ void applyLowLatencyTuning(AVCodecContext* ctx, const char* encoderName) {
         av_opt_set(ctx->priv_data, "preset", "superfast", 0);
         av_opt_set(ctx->priv_data, "tune", "zerolatency", 0);
         av_opt_set(ctx->priv_data, "profile", "high", 0);
+
+        // VBV: let the encoder BURST to 4x average bitrate for sudden
+        // scene changes (cmd → txt full-window, opening fullscreen apps,
+        // etc.). Without these, x264's default rate controller spreads a
+        // single big I-frame across the next ~30 frames worth of budget,
+        // and the viewer sees a multi-second "catch up" lag after every
+        // major screen change. Buffer is 2s so the controller has room to
+        // amortize without strangling individual frames.
+        //
         // sliced-threads + sync-lookahead=0 + rc-lookahead=0 keep the
         // pipeline depth at 1 frame; without these, x264's threading model
         // can still buffer a few frames internally even with zerolatency.
-        av_opt_set(ctx->priv_data, "x264-params",
-                   "scenecut=0:repeat-headers=1:intra-refresh=1:ref=1:bframes=0"
-                   ":sliced-threads=1:sync-lookahead=0:rc-lookahead=0", 0);
+        char x264Params[256];
+        // ctx->bit_rate is bytes/sec; vbv-maxrate/bufsize want kbits/sec.
+        const int avgKbps = static_cast<int>(ctx->bit_rate / 1000);
+        const int vbvMax = avgKbps * 4;
+        const int vbvBuf = avgKbps * 2;
+        std::snprintf(x264Params, sizeof(x264Params),
+                      "scenecut=0:repeat-headers=1:intra-refresh=1:ref=1:bframes=0"
+                      ":sliced-threads=1:sync-lookahead=0:rc-lookahead=0"
+                      ":vbv-maxrate=%d:vbv-bufsize=%d",
+                      vbvMax, vbvBuf);
+        av_opt_set(ctx->priv_data, "x264-params", x264Params, 0);
     } else if (name == "h264_nvenc") {
         av_opt_set(ctx->priv_data, "preset", "p4", 0);
         av_opt_set(ctx->priv_data, "tune", "ll", 0);

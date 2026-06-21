@@ -180,11 +180,21 @@ private:
 
         // First frame after SESSION_START is always IDR — encoder Init()
         // does that for us.
-        if (!encodeAndSend(enc, frame, pts++, /*forceIdr=*/false, &err)) {
+        std::size_t firstBytes = 0;
+        if (!encodeAndSend(enc, frame, pts++, /*forceIdr=*/false, &firstBytes, &err)) {
             std::cerr << "first encode/send failed: " << err << "\n";
             return;
         }
         bool wasIdle = false;
+
+        // Periodic + per-frame diagnostics. Surfaces the cmd→txt scene
+        // change case: a huge encoded frame or a slow encode call is what
+        // turns an instant flip into a perceived multi-second lag.
+        auto statStart = std::chrono::steady_clock::now();
+        int statFrames = 0;
+        std::size_t statBytes = 0;
+        long long statMaxMs = 0;
+        std::size_t statMaxBytes = 0;
 
         while (sessionActive_) {
             next += interval;
@@ -226,24 +236,59 @@ private:
             // viewer that lost packets during the silence resyncs on this
             // frame instead of waiting for the next intra-refresh cycle.
             const bool forceIdr = wasIdle;
-            if (!encodeAndSend(enc, frame, pts++, forceIdr, &err)) {
+            std::size_t thisBytes = 0;
+            const auto t0 = std::chrono::steady_clock::now();
+            if (!encodeAndSend(enc, frame, pts++, forceIdr, &thisBytes, &err)) {
                 std::cerr << "encode/send failed: " << err << "\n";
                 return;
             }
+            const auto t1 = std::chrono::steady_clock::now();
+            const long long encMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
             wasIdle = false;
+
+            // Per-frame warning: any frame that takes longer than half a
+            // frame slot (50ms ≈ 1.5 slots at 30fps) or emits more than
+            // 200KB is what drives the user-visible scene-change lag.
+            if (encMs > 50 || thisBytes > 200 * 1024) {
+                std::cerr << "[stat] heavy frame: " << encMs << "ms, "
+                          << (thisBytes / 1024) << "KB"
+                          << (forceIdr ? " (forced IDR)" : "") << "\n";
+            }
+
+            statFrames++;
+            statBytes += thisBytes;
+            if (encMs > statMaxMs) statMaxMs = encMs;
+            if (thisBytes > statMaxBytes) statMaxBytes = thisBytes;
+            const auto since = std::chrono::duration_cast<std::chrono::seconds>(t1 - statStart).count();
+            if (since >= 2) {
+                std::cerr << "[stat] " << statFrames << " frames in " << since
+                          << "s, total " << (statBytes / 1024) << "KB"
+                          << ", max-enc " << statMaxMs << "ms"
+                          << ", max-frame " << (statMaxBytes / 1024) << "KB\n";
+                statStart = t1;
+                statFrames = 0;
+                statBytes = 0;
+                statMaxMs = 0;
+                statMaxBytes = 0;
+            }
         }
         std::cout << "session ended\n";
     }
 
     bool encodeAndSend(H264Encoder& enc, const DxgiCapturer::Frame& f,
-                       int64_t pts, bool forceIdr, std::string* err) {
+                       int64_t pts, bool forceIdr,
+                       std::size_t* bytesOut, std::string* err) {
         std::vector<std::vector<std::uint8_t>> pkts;
         if (!enc.EncodeFrame(f.pixels.data(), f.rowPitch, pts, forceIdr, &pkts, err)) {
             return false;
         }
+        std::size_t total = 0;
         for (const auto& p : pkts) {
             if (!client_->SendVideoFrame(p.data(), p.size(), err)) return false;
+            total += p.size();
         }
+        if (bytesOut) *bytesOut = total;
         return true;
     }
 
