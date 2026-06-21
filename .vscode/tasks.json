@@ -41,21 +41,20 @@
             }
         },
         {
-            "label": "App: build (Release)",
-            "detail": "cmake --build app/build --config Release. Re-runs CMake configure if app/build doesn't exist yet.",
+            "label": "App: configure",
+            "detail": "cmake -S app -B app/build with FFMPEG_ROOT + Qt prefix passed explicitly so the cache can't go stale on us. Idempotent.",
             "type": "shell",
-            "command": "powershell",
+            "command": "cmake",
             "args": [
-                "-NoProfile",
-                "-Command",
-                "if (-not (Test-Path 'app/build/CMakeCache.txt')) { cmake -S app -B app/build -G 'Visual Studio 18 2026' -A x64 }; cmake --build app/build --config Release"
+                "-S", "app",
+                "-B", "app/build",
+                "-G", "Visual Studio 18 2026",
+                "-A", "x64",
+                "-DFFMPEG_ROOT=E:/Development_environment/vcpkg/installed/x64-windows",
+                "-DCMAKE_PREFIX_PATH=E:/Development_environment/qt/6.7.3/msvc2022_64"
             ],
             "options": {
-                "cwd": "${workspaceFolder}",
-                "env": {
-                    "VCPKG_ROOT": "E:\\Development_environment\\vcpkg",
-                    "QT_DIR": "E:\\Development_environment\\qt\\6.7.3\\msvc2022_64"
-                }
+                "cwd": "${workspaceFolder}"
             },
             "presentation": {
                 "panel": "shared",
@@ -63,11 +62,53 @@
                 "clear": true,
                 "group": "build"
             },
+            "problemMatcher": []
+        },
+        {
+            "label": "App: build (Release)",
+            "detail": "Default build (Ctrl+Shift+B). Runs configure first, then cmake --build. -- /m for parallel jobs.",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build", "app/build",
+                "--config", "Release",
+                "--", "/m", "/v:minimal"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "panel": "shared",
+                "reveal": "always",
+                "clear": false,
+                "group": "build"
+            },
+            "dependsOn": ["App: configure"],
             "problemMatcher": "$msCompile",
             "group": {
                 "kind": "build",
                 "isDefault": true
             }
+        },
+        {
+            "label": "App: clean (rm -rf app/build)",
+            "detail": "Wipe app/build entirely. Use when cmake's cache has gone stale (empty FFMPEG_ROOT in vcxproj POST_BUILD, etc.).",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-Command",
+                "Remove-Item app/build -Recurse -Force -ErrorAction Ignore; Write-Host 'cleaned app/build'"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "panel": "shared",
+                "reveal": "always",
+                "clear": true
+            },
+            "problemMatcher": []
         },
         {
             "label": "App: run (no rebuild)",
@@ -91,7 +132,7 @@
         },
         {
             "label": "App: build + run",
-            "detail": "Compile app then launch it. The default dev iteration step.",
+            "detail": "Compile app then launch it. The actual daily iteration step.",
             "dependsOrder": "sequence",
             "dependsOn": [
                 "App: build (Release)",
