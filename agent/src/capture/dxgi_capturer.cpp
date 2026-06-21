@@ -123,8 +123,17 @@ bool DxgiCapturer::ensureStaging(int width, int height, std::string* errorOut) {
 
 DxgiCapturer::Result DxgiCapturer::CaptureFrame(int timeoutMs, Frame* out, std::string* errorOut) {
     if (!impl_->duplication) {
-        if (errorOut) *errorOut = "capturer not initialised";
-        return Result::kError;
+        // Lazy recovery from a previous DXGI_ERROR_ACCESS_LOST (resolution
+        // change, UAC prompt, Win+L lockscreen, driver restart, sleep/wake).
+        // If the D3D11 device itself is also gone (GPU reset), the caller
+        // has to fall back to a full Init() — handled in agent main.
+        if (!impl_->device) {
+            if (errorOut) *errorOut = "capturer not initialised";
+            return Result::kError;
+        }
+        if (!createDuplication(errorOut)) {
+            return Result::kError;
+        }
     }
 
     if (impl_->frameHeld) {

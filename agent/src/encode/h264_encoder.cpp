@@ -171,10 +171,17 @@ bool H264Encoder::Init(const Config& cfg, std::string* chosenEncoder, std::strin
         return false;
     }
 
+    const int srcW = cfg.srcWidth  > 0 ? cfg.srcWidth  : cfg.width;
+    const int srcH = cfg.srcHeight > 0 ? cfg.srcHeight : cfg.height;
+    // SWS_AREA gives much sharper text on big downscales (4K → 2K) than
+    // SWS_BILINEAR; for no-scale or upscale paths it's equivalent.
+    const int swsFlags = (srcW != cfg.width || srcH != cfg.height)
+                             ? SWS_AREA
+                             : SWS_BILINEAR;
     impl_->sws = sws_getContext(
-        cfg.width, cfg.height, AV_PIX_FMT_BGRA,
+        srcW, srcH, AV_PIX_FMT_BGRA,
         cfg.width, cfg.height, AV_PIX_FMT_YUV420P,
-        SWS_BILINEAR, nullptr, nullptr, nullptr);
+        swsFlags, nullptr, nullptr, nullptr);
     if (!impl_->sws) {
         if (errorOut) *errorOut = "sws_getContext failed";
         return false;
@@ -200,7 +207,11 @@ bool H264Encoder::EncodeFrame(const uint8_t* bgra, int rowPitch, int64_t pts,
 
     const uint8_t* srcSlices[1] = { bgra };
     int srcStrides[1] = { rowPitch };
-    sws_scale(impl_->sws, srcSlices, srcStrides, 0, impl_->cfg.height,
+    // srcSliceH is in SOURCE rows, which may differ from the encoder output
+    // height when downscale is in effect (e.g. 4K → 2K source = 2160 rows).
+    const int srcH = impl_->cfg.srcHeight > 0 ? impl_->cfg.srcHeight
+                                              : impl_->cfg.height;
+    sws_scale(impl_->sws, srcSlices, srcStrides, 0, srcH,
               impl_->frame->data, impl_->frame->linesize);
 
     impl_->frame->pts = pts;

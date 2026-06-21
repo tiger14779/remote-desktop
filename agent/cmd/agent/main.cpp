@@ -31,6 +31,11 @@ struct Flags {
     std::string deviceToken = "agent-token-001";
     int fps = 30;
     int bitrateKbps = 8000;
+    // Cap on the encoded vertical resolution. 4K screens get downscaled to
+    // this before encoding — viewer sees and decodes the smaller image, so
+    // every stage of the pipeline (encode CPU, network, decode, paint) does
+    // 1/3 the work versus native 4K. 0 means no cap.
+    int maxHeight = 1440;
 };
 
 bool parseFlags(int argc, char** argv, Flags* out) {
@@ -51,9 +56,11 @@ bool parseFlags(int argc, char** argv, Flags* out) {
         else if (a == "-device-token") { if (!next(&out->deviceToken)) return false; }
         else if (a == "-fps") { if (!nextInt(&out->fps)) return false; }
         else if (a == "-bitrate") { if (!nextInt(&out->bitrateKbps)) return false; }
+        else if (a == "-max-height") { if (!nextInt(&out->maxHeight)) return false; }
         else if (a == "-h" || a == "--help") {
             std::cout << "usage: agent [-relay host:port] [-device-id ID]"
-                         " [-device-token TOK] [-fps N] [-bitrate KBPS]\n";
+                         " [-device-token TOK] [-fps N] [-bitrate KBPS]"
+                         " [-max-height N (default 1440 = 2K; 0 = native)]\n";
             return false;
         }
         else { std::cerr << "unknown flag: " << a << "\n"; return false; }
@@ -72,8 +79,10 @@ bool splitHostPort(const std::string& s, std::string* host, int* port) {
 // Capture+encode pump. Spends most of its life waiting on `sessionActive`.
 class StreamPump {
 public:
-    StreamPump(DxgiCapturer* cap, RelayClient* client, int fps, int bitrateKbps)
-        : cap_(cap), client_(client), fps_(fps), bitrateKbps_(bitrateKbps) {}
+    StreamPump(DxgiCapturer* cap, RelayClient* client, int fps,
+               int bitrateKbps, int maxHeight)
+        : cap_(cap), client_(client), fps_(fps),
+          bitrateKbps_(bitrateKbps), maxHeight_(maxHeight) {}
 
     void Start() {
         thread_ = std::thread([this]() { run(); });
@@ -133,8 +142,21 @@ private:
 
         H264Encoder enc;
         H264Encoder::Config ec;
-        ec.width = frame.width;
-        ec.height = frame.height;
+        ec.srcWidth  = frame.width;
+        ec.srcHeight = frame.height;
+        // Compute encoder output dims: scale source down to fit the maxHeight
+        // cap while preserving aspect ratio. H.264 + YUV420 require both
+        // dimensions to be even.
+        if (maxHeight_ > 0 && frame.height > maxHeight_) {
+            ec.height = maxHeight_;
+            ec.width  = static_cast<int>(
+                static_cast<int64_t>(frame.width) * maxHeight_ / frame.height);
+            ec.width  &= ~1;
+            ec.height &= ~1;
+        } else {
+            ec.width  = frame.width  & ~1;
+            ec.height = frame.height & ~1;
+        }
         ec.fps = fps_;
         ec.bitrateKbps = bitrateKbps_;
         // GOP = 1 second's worth of frames. Combined with intra-refresh
@@ -147,7 +169,8 @@ private:
             std::cerr << "encoder init failed: " << err << "\n";
             return;
         }
-        std::cout << "session started: " << ec.width << "x" << ec.height
+        std::cout << "session started: " << ec.srcWidth << "x" << ec.srcHeight
+                  << " -> " << ec.width << "x" << ec.height
                   << " @ " << ec.fps << " fps (" << chosen << ")\n";
 
         const auto interval = std::chrono::milliseconds(1000 / fps_);
@@ -170,8 +193,20 @@ private:
             DxgiCapturer::Frame fresh;
             auto r = cap_->CaptureFrame(0, &fresh, &err);
             if (r == DxgiCapturer::Result::kError) {
-                std::cerr << "capture error: " << err << "\n";
-                return;
+                // Don't kill the session — DXGI can transiently lose access
+                // (lockscreen, UAC, GPU reset) and we'd rather just keep
+                // trying until it comes back. Full Init() rebuilds device +
+                // duplication, which covers the GPU-reset case the lazy
+                // recovery in CaptureFrame can't.
+                std::cerr << "capture error: " << err << " — reinit\n";
+                wasIdle = true;
+                std::string initErr;
+                if (!cap_->Init(&initErr)) {
+                    std::cerr << "capture reinit failed: " << initErr
+                              << " — retry in 500ms\n";
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                }
+                continue;
             }
             const bool gotNew = (r == DxgiCapturer::Result::kFrame);
 
@@ -216,6 +251,7 @@ private:
     RelayClient* client_;
     int fps_;
     int bitrateKbps_;
+    int maxHeight_;
     std::thread thread_;
     std::mutex mu_;
     std::condition_variable cv_;
@@ -267,7 +303,7 @@ int main(int argc, char** argv) {
                   << ", waiting for session\n";
         backoffSec = 1; // reset backoff after a successful connect
 
-        StreamPump pump(&cap, &client, flags.fps, flags.bitrateKbps);
+        StreamPump pump(&cap, &client, flags.fps, flags.bitrateKbps, flags.maxHeight);
         pump.Start();
 
         // Heartbeat sender: every 5s, keeps the relay's idle timer alive and

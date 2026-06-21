@@ -18,8 +18,17 @@
 class H264Encoder {
 public:
     struct Config {
+        // Encoder OUTPUT dimensions (what the H.264 stream actually contains
+        // and what the viewer sees). Should be even (H.264 + YUV420
+        // requirement).
         int width = 1920;
         int height = 1080;
+        // Source BGRA dimensions. If non-zero AND different from width/height,
+        // sws_scale downsamples from src to dst as part of the BGRA→YUV
+        // conversion — free downscale. If 0, treated as same as width/height
+        // (no scale).
+        int srcWidth = 0;
+        int srcHeight = 0;
         int fps = 30;
         int bitrateKbps = 4000;
         int gopSize = 60; // keyframe every N frames (~2s @ 30fps)
