@@ -28,6 +28,16 @@ enum MessageType : std::uint8_t {
     MsgMouseButton   = 0x21,
     MsgKeyEvent      = 0x22,
     MsgHeartbeat     = 0x30,
+    MsgClipboardText = 0x40,  // payload: UTF-8 bytes, no terminator
+    MsgCursorShape   = 0x50,  // payload: width(2BE)+height(2BE)+hotX(2BE)+hotY(2BE)+BGRA
+
+    // File transfer over clipboard. One transfer = one Begin, N Chunks
+    // (sequential, no fileIdx — receiver tracks by bytes-remaining-per-file),
+    // one End. No transferId either, since at most one xfer is in-flight on
+    // a connection (the relay's TCP stream is ordered).
+    MsgFileXferBegin = 0x41,  // payload: JSON {"files":[{"path":"...","size":N,"isDir":bool},...]}
+    MsgFileXferChunk = 0x42,  // payload: raw bytes; appended to current file
+    MsgFileXferEnd   = 0x43,  // payload: JSON {"ok":bool} (empty {} for success)
 
     MsgRegisterResp  = 0x81,
     MsgAuthResp      = 0x82,
@@ -47,6 +57,11 @@ inline const char* MessageTypeName(std::uint8_t t) {
         case MsgMouseButton:  return "MOUSE_BUTTON";
         case MsgKeyEvent:     return "KEY_EVENT";
         case MsgHeartbeat:    return "HEARTBEAT";
+        case MsgClipboardText: return "CLIPBOARD_TEXT";
+        case MsgCursorShape:  return "CURSOR_SHAPE";
+        case MsgFileXferBegin: return "FILE_XFER_BEGIN";
+        case MsgFileXferChunk: return "FILE_XFER_CHUNK";
+        case MsgFileXferEnd:   return "FILE_XFER_END";
         case MsgRegisterResp: return "REGISTER_RESP";
         case MsgAuthResp:     return "AUTH_RESP";
         case MsgConnectResp:  return "CONNECT_RESP";

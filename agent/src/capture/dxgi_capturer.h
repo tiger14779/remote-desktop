@@ -37,6 +37,22 @@ public:
 
     Result CaptureFrame(int timeoutMs, Frame* out, std::string* errorOut);
 
+    // Cursor shape, BGRA8, top-down. width*height*4 == bgra.size().
+    struct CursorShape {
+        int width = 0;
+        int height = 0;
+        int hotspotX = 0;
+        int hotspotY = 0;
+        std::vector<std::uint8_t> bgra;
+    };
+
+    // If DXGI delivered a new cursor shape in the most recent CaptureFrame
+    // call (and the agent hasn't yet picked it up), returns true and copies
+    // the decoded BGRA into *out. Subsequent calls return false until a
+    // new shape is available. Mono / masked-color shapes are pre-converted
+    // here so the wire format stays a single BGRA blob.
+    bool TakeCursorShape(CursorShape* out);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

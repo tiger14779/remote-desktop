@@ -33,6 +33,13 @@ const (
 	MsgKeyEvent    MessageType = 0x22 // Viewer -> Agent
 	MsgHeartbeat   MessageType = 0x30 // bidirectional, empty payload
 
+	MsgClipboardText MessageType = 0x40 // bidirectional, payload: UTF-8 bytes
+	MsgCursorShape   MessageType = 0x50 // Agent -> Viewer, payload: cursor BGRA + metadata
+
+	MsgFileXferBegin MessageType = 0x41 // bidirectional, JSON file list
+	MsgFileXferChunk MessageType = 0x42 // bidirectional, raw bytes
+	MsgFileXferEnd   MessageType = 0x43 // bidirectional, JSON status
+
 	// Responses.
 	MsgRegisterResp MessageType = 0x81 // Relay -> Agent
 	MsgAuthResp     MessageType = 0x82 // Relay -> Viewer
@@ -115,6 +122,16 @@ func (t MessageType) String() string {
 		return "KEY_EVENT"
 	case MsgHeartbeat:
 		return "HEARTBEAT"
+	case MsgClipboardText:
+		return "CLIPBOARD_TEXT"
+	case MsgCursorShape:
+		return "CURSOR_SHAPE"
+	case MsgFileXferBegin:
+		return "FILE_XFER_BEGIN"
+	case MsgFileXferChunk:
+		return "FILE_XFER_CHUNK"
+	case MsgFileXferEnd:
+		return "FILE_XFER_END"
 	case MsgRegisterResp:
 		return "REGISTER_RESP"
 	case MsgAuthResp:

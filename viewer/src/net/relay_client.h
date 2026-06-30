@@ -22,6 +22,16 @@ public:
 
     struct Callbacks {
         std::function<void(const std::uint8_t* data, std::size_t size)> onVideoFrame;
+        // Inbound CLIPBOARD_TEXT from agent. Payload is UTF-8.
+        std::function<void(const std::uint8_t* data, std::size_t size)> onClipboard;
+        // Inbound CURSOR_SHAPE: header + BGRA. Caller parses the 8-byte
+        // header then takes ownership of the remaining bytes.
+        std::function<void(int width, int height, int hotX, int hotY,
+                           const std::uint8_t* bgra, std::size_t bgraSize)> onCursorShape;
+        // Inbound FILE_XFER_BEGIN/CHUNK/END from agent. Type discriminates.
+        std::function<void(std::uint8_t type,
+                           const std::uint8_t* data,
+                           std::size_t size)> onFileXfer;
         std::function<void()> onDisconnect;
     };
 
@@ -36,6 +46,14 @@ public:
     // capture into this. Thread-safe.
     bool SendInput(std::uint8_t type, const std::uint8_t* data, std::size_t size,
                    std::string* errorOut);
+
+    // Thread-safe. Sends CLIPBOARD_TEXT with the given UTF-8 bytes.
+    bool SendClipboard(const std::uint8_t* data, std::size_t size, std::string* errorOut);
+
+    // Thread-safe. Generic frame writer for FILE_XFER_BEGIN/CHUNK/END etc.
+    bool SendFrameRaw(std::uint8_t type,
+                      const std::uint8_t* data, std::size_t size,
+                      std::string* errorOut);
 
     // Thread-safe. Empty HEARTBEAT frame; keeps the relay's idle timer fresh.
     bool SendHeartbeat(std::string* errorOut);

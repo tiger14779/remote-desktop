@@ -30,7 +30,7 @@ message(STATUS "FFmpeg root: ${FFMPEG_ROOT}")
 if(NOT CMAKE_PREFIX_PATH AND DEFINED ENV{QT_DIR})
     list(APPEND CMAKE_PREFIX_PATH "$ENV{QT_DIR}")
 endif()
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets)
 qt_standard_project_setup()
 message(STATUS "Qt6 ${Qt6_VERSION} at ${Qt6_DIR}")
 
@@ -71,8 +71,9 @@ qt_add_executable(viewer
     src/ui/video_widget.cpp
     src/ui/main_window.cpp
     src/ui/viewer_session.cpp
+    src/ui/clipboard_file_xfer.cpp
 )
-target_link_libraries(viewer PRIVATE viewer_core Qt6::Widgets)
+target_link_libraries(viewer PRIVATE viewer_core Qt6::Widgets Qt6::OpenGLWidgets)
 set_target_properties(viewer PROPERTIES WIN32_EXECUTABLE ON)
 
 # Copy FFmpeg DLLs next to viewer.exe so it runs without PATH edits. Qt's

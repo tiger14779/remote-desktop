@@ -66,11 +66,30 @@ void applyLowLatencyTuning(AVCodecContext* ctx, const char* encoderName) {
                       vbvMax, vbvBuf);
         av_opt_set(ctx->priv_data, "x264-params", x264Params, 0);
     } else if (name == "h264_nvenc") {
-        av_opt_set(ctx->priv_data, "preset", "p4", 0);
-        av_opt_set(ctx->priv_data, "tune", "ll", 0);
+        // p1 = fastest preset; on NVENC silicon the quality cost is small
+        // compared to the latency win, and screen content doesn't benefit
+        // from heavy motion-estimation anyway.
+        av_opt_set(ctx->priv_data, "preset", "p1", 0);
+        // ull = ultra-low-latency: disables lookahead and B-frames implicitly,
+        // single-pass rate control, packets emitted as soon as encoded.
+        av_opt_set(ctx->priv_data, "tune", "ull", 0);
         av_opt_set(ctx->priv_data, "zerolatency", "1", 0);
-        av_opt_set(ctx->priv_data, "rc", "vbr", 0);                // vbr keeps quality higher than cbr at low bitrate
+        av_opt_set(ctx->priv_data, "delay", "0", 0);
+        // CBR keeps each frame within a tight bit budget — pairs naturally
+        // with intra-refresh (no big IDR spikes to fit in).
+        av_opt_set(ctx->priv_data, "rc", "cbr", 0);
         av_opt_set(ctx->priv_data, "intra-refresh", "1", 0);
+        // forced-idr=1 makes frame->pict_type=I produce a true IDR; without it
+        // NVENC may ignore the request mid-intra-refresh cycle.
+        av_opt_set(ctx->priv_data, "forced-idr", "1", 0);
+        // VBV bufsize ≈ 1 frame's worth, so HRD-compliant viewers don't
+        // pre-buffer half a second before starting playback. With tune=ull
+        // + delay=0 + intra-refresh, per-frame bit budget stays close to
+        // average; the encoder doesn't need a large smoothing buffer.
+        const int avgKbps = static_cast<int>(ctx->bit_rate / 1000);
+        const int fpsGuess = ctx->framerate.num > 0 ? ctx->framerate.num : 60;
+        ctx->rc_buffer_size = (avgKbps * 1000) / fpsGuess;  // 1 frame worth
+        ctx->rc_max_rate    = ctx->bit_rate;
     } else if (name == "h264_amf") {
         av_opt_set(ctx->priv_data, "usage", "ultralowlatency", 0);
         av_opt_set(ctx->priv_data, "quality", "speed", 0);

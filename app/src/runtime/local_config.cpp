@@ -2,6 +2,7 @@
 
 #include <QDir>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRandomGenerator>
@@ -16,26 +17,12 @@ QString configFilePath() {
 }
 
 QString randomDeviceId() {
-    // 9-digit decimal — matches the RustDesk feel and is short enough to
-    // type / dictate over the phone.
+    // 5-digit decimal: 10000..99999 (90000 IDs, ~17-bit entropy — fine for
+    // a ten-people internal deployment where collisions are resolved by
+    // the operator hitting "new id" in practice).
     auto* gen = QRandomGenerator::global();
-    quint64 raw = gen->generate64() % 1000000000ULL;
-    if (raw < 100000000ULL) raw += 100000000ULL;
+    const quint64 raw = (gen->generate64() % 90000ULL) + 10000ULL;
     return QString::number(raw);
-}
-
-QString randomVerifyCode() {
-    static const char kAlphabet[] =
-        "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // skip O/0, I/1 for legibility
-    constexpr int kLen = 8;
-    constexpr int kAlphaLen = sizeof(kAlphabet) - 1;
-    QString out;
-    out.reserve(kLen);
-    auto* gen = QRandomGenerator::global();
-    for (int i = 0; i < kLen; ++i) {
-        out.append(QLatin1Char(kAlphabet[gen->bounded(kAlphaLen)]));
-    }
-    return out;
 }
 
 bool tryRead(const QString& path, LocalConfig* out) {
@@ -46,30 +33,40 @@ bool tryRead(const QString& path, LocalConfig* out) {
     const auto doc = QJsonDocument::fromJson(bytes, &err);
     if (err.error != QJsonParseError::NoError || !doc.isObject()) return false;
     const auto obj = doc.object();
-    out->deviceId   = obj.value("device_id").toString();
-    out->verifyCode = obj.value("verify_code").toString();
-    return !out->deviceId.isEmpty() && !out->verifyCode.isEmpty();
+    out->deviceId = obj.value("device_id").toString();
+    out->recentRemoteIds.clear();
+    for (const auto& v : obj.value("recent_remote_ids").toArray()) {
+        const QString s = v.toString();
+        if (!s.isEmpty()) out->recentRemoteIds.append(s);
+    }
+    // Reject pre-existing 9-digit IDs from the previous schema so the
+    // upgrade silently re-rolls to the new 5-digit format. There's no
+    // history to preserve — connecting old viewers to new agents still
+    // works as long as both run the upgraded build.
+    if (out->deviceId.length() != 5) return false;
+    return !out->deviceId.isEmpty();
 }
 
-void write(const QString& path, const LocalConfig& cfg) {
+} // namespace
+
+void SaveLocalConfig(const LocalConfig& cfg) {
     QJsonObject obj;
-    obj["device_id"]   = cfg.deviceId;
-    obj["verify_code"] = cfg.verifyCode;
-    QFile f(path);
+    obj["device_id"] = cfg.deviceId;
+    QJsonArray arr;
+    for (const auto& s : cfg.recentRemoteIds) arr.append(s);
+    obj["recent_remote_ids"] = arr;
+    QFile f(configFilePath());
     if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         f.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));
     }
 }
-
-} // namespace
 
 LocalConfig LoadOrCreateLocalConfig() {
     LocalConfig cfg;
     const QString path = configFilePath();
     if (tryRead(path, &cfg)) return cfg;
 
-    cfg.deviceId   = randomDeviceId();
-    cfg.verifyCode = randomVerifyCode();
-    write(path, cfg);
+    cfg.deviceId = randomDeviceId();
+    SaveLocalConfig(cfg);
     return cfg;
 }

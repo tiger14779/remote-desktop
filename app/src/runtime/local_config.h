@@ -1,24 +1,27 @@
 #pragma once
 
 #include <QString>
+#include <QStringList>
 
 // Per-machine identity that persists across launches. Stored at
-// %APPDATA%\remote_desktop\local.json so the same physical machine keeps
-// the same ID/code without anyone touching a config file by hand.
+// %APPDATA%\remote_desktop\local.json.
 //
-// On first run we synthesise:
-//   - deviceId   : 9-digit random number, RustDesk-style
-//   - verifyCode : 8-char alphanumeric, what someone else must type to
-//                  connect TO this machine
+// On first run we synthesise a 5-digit deviceId — short enough to dictate
+// across a meeting room, large enough to give 90K IDs in the dynamic
+// registration pool. There's no per-target verifyCode for this build:
+// the deployment is internal-use only and the relay still enforces the
+// global session_token, so an extra per-target code wouldn't add anything
+// the operators wouldn't immediately memorise as a constant.
 //
-// For the MVP the relay still authenticates via the fixed admin /
-// session_token pair from config.production.json — the verifyCode is
-// displayed for the operator's mental model but isn't yet enforced on the
-// relay side. T2-7 onwards: extend CONNECT to carry the target's
-// verifyCode and have the agent compare it.
+// recentRemoteIds is a small MRU list of devices this machine has connected
+// TO, surfaced in the GUI as one-click reconnect buttons.
 struct LocalConfig {
-    QString deviceId;
-    QString verifyCode;
+    QString     deviceId;
+    QStringList recentRemoteIds;
 };
 
 LocalConfig LoadOrCreateLocalConfig();
+
+// Persists the current state. Call after mutating recentRemoteIds. Safe to
+// call from the GUI thread (small file, sync write).
+void SaveLocalConfig(const LocalConfig& cfg);

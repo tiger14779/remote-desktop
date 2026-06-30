@@ -1,8 +1,11 @@
 #include "ui/main_window.h"
 
+#include "ui/clipboard_file_xfer.h"
 #include "ui/video_widget.h"
 #include "ui/viewer_session.h"
 
+#include <QApplication>
+#include <QClipboard>
 #include <QCloseEvent>
 #include <QLabel>
 #include <QStatusBar>
@@ -60,6 +63,44 @@ MainWindow::MainWindow(const ViewerSession::Config& cfg, QWidget* parent)
                 if (session_) session_->sendKey(vk, down);
             });
 
+    // Clipboard sync (bidirectional, text). Outbound: any local change is
+    // forwarded to the agent unless we ourselves just set it. Inbound: text
+    // arrives via a queued signal from the network thread, we apply it
+    // locally and prime lastNetText_ so the resulting dataChanged echo is
+    // filtered out instead of bouncing back to the agent.
+    connect(session_.data(), &ViewerSession::clipboardReceived,
+            this, &MainWindow::onClipboardReceived, Qt::QueuedConnection);
+    connect(QApplication::clipboard(), &QClipboard::dataChanged,
+            this, &MainWindow::onLocalClipboardChanged);
+
+    // Cursor shape mirror is disabled — see agent_runner.cpp note. The
+    // signal stays exposed by ViewerSession but no slot listens, so the
+    // VideoWidget keeps Qt's default arrow cursor.
+
+    // Clipboard file transfer — same QClipboard subscription as the text
+    // path above; ClipboardFileXfer inspects mimeData and routes either to
+    // text-sync (handled by onLocalClipboardChanged) or file-xfer (here).
+    fileXfer_ = new ClipboardFileXfer(this);
+    fileXfer_->setSendFn([this](std::uint8_t t, const std::uint8_t* d, std::size_t s) {
+        if (session_) {
+            session_->sendFrameRaw(
+                t, QByteArray(reinterpret_cast<const char*>(d),
+                              static_cast<int>(s)));
+        }
+    });
+    connect(session_.data(), &ViewerSession::fileXferFrameReceived,
+            this, [this](std::uint8_t t, const QByteArray& p) {
+                if (fileXfer_) {
+                    fileXfer_->onPeerFrame(
+                        t, reinterpret_cast<const std::uint8_t*>(p.constData()),
+                        static_cast<std::size_t>(p.size()));
+                }
+            }, Qt::QueuedConnection);
+    connect(QApplication::clipboard(), &QClipboard::dataChanged,
+            this, [this]() { if (fileXfer_) fileXfer_->onLocalClipboardChanged(); });
+    connect(fileXfer_, &ClipboardFileXfer::log, this,
+            [](const QString& s) { qInfo("%s", qUtf8Printable(s)); });
+
     workerThread_.start();
     QMetaObject::invokeMethod(session_.data(),
                               "start", Qt::QueuedConnection,
@@ -83,4 +124,19 @@ void MainWindow::onStatus(const QString& s) {
 
 void MainWindow::onDisconnected(const QString& reason) {
     status_->setText(QStringLiteral("disconnected: %1").arg(reason));
+}
+
+void MainWindow::onClipboardReceived(const QString& text) {
+    if (text == lastNetText_) return;  // already in sync
+    lastNetText_ = text;
+    QApplication::clipboard()->setText(text);
+}
+
+void MainWindow::onLocalClipboardChanged() {
+    if (!session_) return;
+    const QString text = QApplication::clipboard()->text();
+    if (text == lastNetText_) return;  // echo from our own setText
+    if (text.isEmpty()) return;        // don't sync empty (e.g. image copy)
+    lastNetText_ = text;
+    session_->sendClipboardText(text);
 }

@@ -8,6 +8,8 @@
 
 class QLabel;
 class QLineEdit;
+class QListWidget;
+class QListWidgetItem;
 class QPlainTextEdit;
 class QPushButton;
 
@@ -26,22 +28,32 @@ protected:
 private slots:
     void copyToClipboard(QLineEdit* src);
     void onConnectClicked();
+    void onRecentItemActivated(QListWidgetItem* item);
     void onAgentStatus(const QString& s);
     void onLogLine(const QString& s);
+    void onAgentClipboardReceived(const QString& text);
+    void onLocalClipboardChanged();
 
 private:
     void appendLog(const QString& s);
+    void rememberRecent(const QString& remoteId);
+    void refreshRecentList();
 
     LocalConfig local_;
     AgentRunner agent_;
 
-    QLineEdit* localIdField_ = nullptr;
-    QLineEdit* localCodeField_ = nullptr;
-    QLabel*    statusLabel_ = nullptr;
+    // See MainWindow::lastNetText_ — same loop-break trick for the agent
+    // side of clipboard sync.
+    QString lastNetText_;
 
-    QLineEdit* remoteIdField_ = nullptr;
-    QLineEdit* remoteCodeField_ = nullptr;
+    QLineEdit*   localIdField_ = nullptr;
+    QLabel*      statusLabel_ = nullptr;
+
+    QLineEdit*   remoteIdField_ = nullptr;
     QPushButton* connectButton_ = nullptr;
+    QListWidget* recentList_ = nullptr;
 
     QPlainTextEdit* logView_ = nullptr;
+
+    class ClipboardFileXfer* fileXfer_ = nullptr;
 };

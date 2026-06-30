@@ -38,8 +38,22 @@ public:
     void start(const Config& cfg);
     void stop();
 
+    // Sends UTF-8 clipboard text to the connected viewer (no-op if no viewer
+    // is currently attached). Safe to call from the GUI thread.
+    void sendClipboardText(const QString& text);
+
+    // Generic frame writer (used by ClipboardFileXfer for the FILE_XFER_*
+    // family). No-op if no viewer attached. Safe to call from GUI thread.
+    void sendFrameRaw(std::uint8_t type, const QByteArray& payload);
+
 signals:
     void status(const QString& text);
+    // Fired on the GUI thread when the viewer pushes its clipboard contents
+    // into this agent. Subscribers should set the local clipboard.
+    void clipboardReceived(const QString& text);
+    // FILE_XFER_BEGIN/CHUNK/END from the viewer. Payload is the raw frame
+    // body — the bridge parses it.
+    void fileXferFrameReceived(std::uint8_t type, const QByteArray& payload);
 
 private:
     void runLoop(Config cfg);  // worker-thread body

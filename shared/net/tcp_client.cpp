@@ -68,6 +68,18 @@ bool TcpClient::Connect(const std::string& host, int port, std::string* errorOut
     BOOL one = TRUE;
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&one), sizeof(one));
 
+    // SO_SNDBUF small (~128KB). Windows defaults the send buffer to ~2MB+
+    // (auto-tuned), which means WriteAll returns immediately even when the
+    // far side is several seconds behind reading — frames silently pile up
+    // in kernel memory. For a low-latency screen stream we want WriteAll
+    // to BLOCK as soon as the consumer falls behind, so the encoder gets
+    // back-pressure and we never emit a frame the viewer won't see for ~1s.
+    // 128KB ≈ 2 typical encoded frames; one IDR (~500KB) still fits in
+    // a single send via TCP segmentation.
+    int sndBuf = 128 * 1024;
+    setsockopt(s, SOL_SOCKET, SO_SNDBUF,
+               reinterpret_cast<const char*>(&sndBuf), sizeof(sndBuf));
+
     sock_ = static_cast<std::uint64_t>(s);
     return true;
 }

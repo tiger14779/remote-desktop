@@ -102,23 +102,22 @@ private:
                   << " -> " << ec.width << "x" << ec.height
                   << " @ " << ec.fps << "fps (" << chosen << ")\n";
 
-        const auto interval = std::chrono::milliseconds(1000 / fps_);
-        auto next = std::chrono::steady_clock::now();
+        // Used as the AcquireNextFrame timeout: block up to one frame-period
+        // waiting for a new present, then move on so a long idle still gets
+        // statistics + the sessionActive_ check.
+        const int captureTimeoutMs =
+            std::max(1, static_cast<int>(std::chrono::milliseconds(1000 / fps_).count()));
         int64_t pts = 0;
         std::size_t firstBytes = 0;
         long long firstEnc = 0, firstSend = 0;
         if (!encodeAndSend(enc, frame, pts++, /*forceIdr=*/false,
                            &firstBytes, &firstEnc, &firstSend, &err)) return;
-        bool wasIdle = false;
-        auto lastGotFrame = std::chrono::steady_clock::now();
-        // Only mark wasIdle (and force an IDR on the next real frame) after
-        // sustained DXGI silence. Without this, dragging a window flapped
-        // wasIdle on every 33ms iter that landed in a "mouse-only" DXGI
-        // gap, which forced an IDR on the very next frame and emitted a
-        // 250–280 KB burst — 5+ IDRs per second, totally trashing the LAN
-        // pipeline. 1 second of silence is plenty to trip the recovery
-        // path; anything shorter is just normal drag jitter.
-        constexpr auto kIdleThreshold = std::chrono::seconds(1);
+        // No idle-triggered IDR. intra-refresh is on, so every gop_size frames
+        // the whole picture is already being rolled through I-stripes — the
+        // decoder is always self-recovering and never needs a "fresh start"
+        // IDR after a quiet period. The earlier wasIdle path was firing a
+        // 600KB IDR after every click in a slowly-clicked file list, which
+        // dominated perceived latency on small UI changes.
 
         // Per-frame + per-2s diagnostics. encode_ms and send_ms are reported
         // separately so the operator can tell "encoder is slow on this
@@ -131,34 +130,61 @@ private:
         long long statMaxSend = 0;
         std::size_t statMaxBytes = 0;
 
-        while (sessionActive_) {
-            next += interval;
-            std::this_thread::sleep_until(next);
+        // Heartbeat: if DXGI hasn't reported a new present in this long, the
+        // user can be stuck staring at a stale frame on the viewer. DXGI's
+        // "no fire when nothing changes" semantics + Windows 11 DWM's habit
+        // of compositing small UI updates (file list highlight, etc.) via
+        // DirectComposition that DXGI Desktop Duplication doesn't always
+        // pick up mean the cached frame is sometimes "behind reality" by
+        // an unbounded amount until the user nudges the desktop. We force
+        // re-encode at this cadence so the pipeline stays warm and we
+        // catch any DXGI fire within roughly one heartbeat-period.
+        constexpr auto kHeartbeatInterval = std::chrono::milliseconds(50);
+        auto lastSentAt = std::chrono::steady_clock::now();
+        int statRealFrames = 0;
+        int statHeartbeatFrames = 0;
 
+        while (sessionActive_) {
+            // Short capture timeout so the heartbeat check still fires
+            // promptly when DXGI sits silent for a long time.
             DxgiCapturer::Frame fresh;
-            auto r = cap_->CaptureFrame(0, &fresh, &err);
+            const int hbMs = static_cast<int>(kHeartbeatInterval.count());
+            const int waitMs = std::min(captureTimeoutMs, hbMs);
+            auto r = cap_->CaptureFrame(waitMs, &fresh, &err);
             if (r == DxgiCapturer::Result::kError) {
                 std::cerr << "[agent] capture error: " << err << " — reinit\n";
                 if (!cap_->Init(&err)) std::this_thread::sleep_for(500ms);
-                wasIdle = true;
                 continue;
             }
-            if (r != DxgiCapturer::Result::kFrame) {
-                if (std::chrono::steady_clock::now() - lastGotFrame > kIdleThreshold) {
-                    wasIdle = true;
+            bool isHeartbeat = false;
+            if (r == DxgiCapturer::Result::kFrame) {
+                frame = std::move(fresh);
+            } else {
+                // No new DXGI frame. Only re-send if the heartbeat interval
+                // has elapsed (don't flood the encoder with duplicates).
+                if (std::chrono::steady_clock::now() - lastSentAt < kHeartbeatInterval) {
+                    continue;
                 }
-                continue;
+                isHeartbeat = true;
             }
-            frame = std::move(fresh);
-            lastGotFrame = std::chrono::steady_clock::now();
 
-            const bool forceIdr = wasIdle;
             std::size_t thisBytes = 0;
             long long encMs = 0, sendMs = 0;
-            if (!encodeAndSend(enc, frame, pts++, forceIdr,
+            if (!encodeAndSend(enc, frame, pts++, /*forceIdr=*/false,
                                 &thisBytes, &encMs, &sendMs, &err)) return;
             const auto t1 = std::chrono::steady_clock::now();
-            wasIdle = false;
+            lastSentAt = t1;
+            if (isHeartbeat) ++statHeartbeatFrames;
+            else              ++statRealFrames;
+
+            // Cursor shape forwarding is wired but disabled: the
+            // monochrome/masked-color decode created I-beams that
+            // obscured underlying text on the viewer side, and the user
+            // preferred the plain Qt arrow over a half-working
+            // shape-follow. Code path stays intact for a future re-enable;
+            // just drain DXGI's pending shape so we don't accumulate it.
+            DxgiCapturer::CursorShape shape;
+            cap_->TakeCursorShape(&shape);
 
             // Per-frame warning. If encode_ms is the big number, libx264
             // is the bottleneck on this CPU. If send_ms is big, viewer is
@@ -166,8 +192,7 @@ private:
             if (encMs > 50 || sendMs > 50 || thisBytes > 200 * 1024) {
                 std::cerr << "[stat] heavy frame: enc=" << encMs << "ms"
                           << " send=" << sendMs << "ms"
-                          << " " << (thisBytes / 1024) << "KB"
-                          << (forceIdr ? " (forced IDR)" : "") << "\n";
+                          << " " << (thisBytes / 1024) << "KB\n";
             }
             statFrames++;
             statBytes += thisBytes;
@@ -178,7 +203,10 @@ private:
                 std::chrono::duration_cast<std::chrono::seconds>(t1 - statStart).count();
             if (since >= 2) {
                 std::cerr << "[stat] " << statFrames << " frames in " << since
-                          << "s, total " << (statBytes / 1024) << "KB"
+                          << "s ("
+                          << statRealFrames << " dxgi + "
+                          << statHeartbeatFrames << " hb)"
+                          << ", total " << (statBytes / 1024) << "KB"
                           << ", max-enc " << statMaxEnc << "ms"
                           << ", max-send " << statMaxSend << "ms"
                           << ", max-frame " << (statMaxBytes / 1024) << "KB\n";
@@ -188,6 +216,8 @@ private:
                 statMaxEnc = 0;
                 statMaxSend = 0;
                 statMaxBytes = 0;
+                statRealFrames = 0;
+                statHeartbeatFrames = 0;
             }
         }
     }
@@ -240,6 +270,28 @@ void AgentRunner::start(const Config& cfg) {
     workerThread_.start();
     moveToThread(&workerThread_);
     QMetaObject::invokeMethod(this, [this]() { runLoop(cfg_); }, Qt::QueuedConnection);
+}
+
+void AgentRunner::sendClipboardText(const QString& text) {
+    std::lock_guard<std::mutex> g(clientMu_);
+    if (!activeClient_) return;  // no viewer connected, drop
+    const QByteArray utf8 = text.toUtf8();
+    std::string err;
+    activeClient_->SendClipboard(
+        reinterpret_cast<const std::uint8_t*>(utf8.constData()),
+        static_cast<std::size_t>(utf8.size()), &err);
+    // Errors here are usually "socket closed" — the read loop will tear down
+    // the session on its own; we drop quietly.
+}
+
+void AgentRunner::sendFrameRaw(std::uint8_t type, const QByteArray& payload) {
+    std::lock_guard<std::mutex> g(clientMu_);
+    if (!activeClient_) return;
+    std::string err;
+    activeClient_->SendFrameRaw(
+        type,
+        reinterpret_cast<const std::uint8_t*>(payload.constData()),
+        static_cast<std::size_t>(payload.size()), &err);
 }
 
 void AgentRunner::stop() {
@@ -341,6 +393,19 @@ void AgentRunner::runLoop(Config cfg) {
         cb.onInput = [](std::uint8_t t, const std::uint8_t* d, std::size_t s) {
             std::string e;
             input::HandleInputFrame(t, d, s, &e);
+        };
+        cb.onClipboard = [this](const std::uint8_t* d, std::size_t s) {
+            QString text = QString::fromUtf8(reinterpret_cast<const char*>(d),
+                                              static_cast<int>(s));
+            // Hop to GUI thread via queued signal so QClipboard interaction
+            // happens on the thread that owns the GUI event loop.
+            emit clipboardReceived(text);
+        };
+        cb.onFileXfer = [this](std::uint8_t type,
+                                const std::uint8_t* d, std::size_t s) {
+            emit fileXferFrameReceived(
+                type,
+                QByteArray(reinterpret_cast<const char*>(d), static_cast<int>(s)));
         };
         client.Run(cb);
 

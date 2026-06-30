@@ -4,6 +4,7 @@
 
 // Viewer's MainWindow class lives at viewer/src/ui/main_window.h; that path
 // is on our include search list via app/CMakeLists.
+#include "ui/clipboard_file_xfer.h"
 #include "ui/main_window.h"
 #include "ui/viewer_session.h"
 
@@ -16,6 +17,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -24,7 +26,7 @@
 #include <QVBoxLayout>
 
 // Hardcoded relay endpoint — change here for now, will be configurable later.
-static constexpr const char* kRelayHost = "192.168.1.29";
+static constexpr const char* kRelayHost = "192.243.119.207";
 static constexpr int         kRelayPort = 7100;
 
 // For the MVP we keep the relay's existing auth model (admin / session_token
@@ -64,7 +66,7 @@ AppMainWindow::AppMainWindow(const LocalConfig& localCfg, QWidget* parent)
         localIdField_->setReadOnly(true);
         QFont mono = localIdField_->font();
         mono.setFamily(QStringLiteral("Consolas"));
-        mono.setPointSize(mono.pointSize() + 2);
+        mono.setPointSize(mono.pointSize() + 4);
         localIdField_->setFont(mono);
         idRow->addWidget(localIdField_, 1);
         auto* copyId = new QPushButton(QStringLiteral("复制"));
@@ -73,19 +75,6 @@ AppMainWindow::AppMainWindow(const LocalConfig& localCfg, QWidget* parent)
             copyToClipboard(localIdField_);
         });
         gl->addLayout(idRow);
-
-        auto* codeRow = new QHBoxLayout;
-        codeRow->addWidget(new QLabel(QStringLiteral("验证码:")));
-        localCodeField_ = new QLineEdit(local_.verifyCode);
-        localCodeField_->setReadOnly(true);
-        localCodeField_->setFont(mono);
-        codeRow->addWidget(localCodeField_, 1);
-        auto* copyCode = new QPushButton(QStringLiteral("复制"));
-        codeRow->addWidget(copyCode);
-        connect(copyCode, &QPushButton::clicked, this, [this]() {
-            copyToClipboard(localCodeField_);
-        });
-        gl->addLayout(codeRow);
 
         statusLabel_ = new QLabel(QStringLiteral("启动中..."));
         statusLabel_->setStyleSheet(QStringLiteral("color: #666;"));
@@ -102,16 +91,13 @@ AppMainWindow::AppMainWindow(const LocalConfig& localCfg, QWidget* parent)
         auto* idRow = new QHBoxLayout;
         idRow->addWidget(new QLabel(QStringLiteral("远程 ID:")));
         remoteIdField_ = new QLineEdit;
-        remoteIdField_->setPlaceholderText(QStringLiteral("对方的 9 位 ID"));
+        remoteIdField_->setPlaceholderText(QStringLiteral("对方的 5 位 ID"));
+        // Enter inside the field acts the same as clicking 连接, so the
+        // typical "type id, hit enter" flow doesn't need to find the mouse.
+        connect(remoteIdField_, &QLineEdit::returnPressed,
+                this, &AppMainWindow::onConnectClicked);
         idRow->addWidget(remoteIdField_, 1);
         gl->addLayout(idRow);
-
-        auto* codeRow = new QHBoxLayout;
-        codeRow->addWidget(new QLabel(QStringLiteral("验证码:")));
-        remoteCodeField_ = new QLineEdit;
-        remoteCodeField_->setPlaceholderText(QStringLiteral("对方的 8 位验证码"));
-        codeRow->addWidget(remoteCodeField_, 1);
-        gl->addLayout(codeRow);
 
         connectButton_ = new QPushButton(QStringLiteral("连接"));
         connectButton_->setMinimumHeight(36);
@@ -121,6 +107,22 @@ AppMainWindow::AppMainWindow(const LocalConfig& localCfg, QWidget* parent)
         connectButton_->setFont(bigger);
         connect(connectButton_, &QPushButton::clicked, this, &AppMainWindow::onConnectClicked);
         gl->addWidget(connectButton_);
+
+        // Recent IDs — populated from LocalConfig::recentRemoteIds, persisted
+        // across launches. Double-click connects immediately so the common
+        // "I want back into the box I had open earlier" path stays one
+        // gesture. Single-click only fills the input field (gives the
+        // operator a chance to bail out if it's the wrong machine).
+        gl->addWidget(new QLabel(QStringLiteral("最近连接:")));
+        recentList_ = new QListWidget;
+        recentList_->setMaximumHeight(120);
+        connect(recentList_, &QListWidget::itemClicked, this,
+                [this](QListWidgetItem* item) {
+                    if (item) remoteIdField_->setText(item->text());
+                });
+        connect(recentList_, &QListWidget::itemActivated,
+                this, &AppMainWindow::onRecentItemActivated);
+        gl->addWidget(recentList_);
 
         root->addWidget(g);
     }
@@ -165,6 +167,35 @@ AppMainWindow::AppMainWindow(const LocalConfig& localCfg, QWidget* parent)
     connect(LogSink::instance(), &LogSink::line,
             this, &AppMainWindow::onLogLine, Qt::QueuedConnection);
 
+    // Clipboard sync: when a viewer is attached to us as agent, mirror text
+    // both directions. Loop-break is identical to the viewer side — track
+    // last-net-text, ignore self-induced dataChanged.
+    connect(&agent_, &AgentRunner::clipboardReceived,
+            this, &AppMainWindow::onAgentClipboardReceived, Qt::QueuedConnection);
+    connect(QApplication::clipboard(), &QClipboard::dataChanged,
+            this, &AppMainWindow::onLocalClipboardChanged);
+
+    // Clipboard file transfer (agent-side participant). Same QClipboard
+    // subscription drives both text and file flows; ClipboardFileXfer only
+    // engages when mimeData has URLs.
+    fileXfer_ = new ClipboardFileXfer(this);
+    fileXfer_->setSendFn([this](std::uint8_t t, const std::uint8_t* d, std::size_t s) {
+        agent_.sendFrameRaw(
+            t, QByteArray(reinterpret_cast<const char*>(d), static_cast<int>(s)));
+    });
+    connect(&agent_, &AgentRunner::fileXferFrameReceived,
+            this, [this](std::uint8_t t, const QByteArray& p) {
+                if (fileXfer_) {
+                    fileXfer_->onPeerFrame(
+                        t, reinterpret_cast<const std::uint8_t*>(p.constData()),
+                        static_cast<std::size_t>(p.size()));
+                }
+            }, Qt::QueuedConnection);
+    connect(QApplication::clipboard(), &QClipboard::dataChanged,
+            this, [this]() { if (fileXfer_) fileXfer_->onLocalClipboardChanged(); });
+    connect(fileXfer_, &ClipboardFileXfer::log,
+            this, &AppMainWindow::appendLog);
+
     // Spin up the always-on agent connection.
     AgentRunner::Config rcfg;
     rcfg.relayHost = QString::fromLatin1(kRelayHost);
@@ -182,8 +213,8 @@ AppMainWindow::AppMainWindow(const LocalConfig& localCfg, QWidget* parent)
     connect(&agent_, &AgentRunner::status, this,
             &AppMainWindow::onAgentStatus, Qt::QueuedConnection);
 
-    appendLog(QStringLiteral("app started — local id=%1 code=%2")
-                  .arg(local_.deviceId, local_.verifyCode));
+    appendLog(QStringLiteral("app started — local id=%1").arg(local_.deviceId));
+    refreshRecentList();
     agent_.start(rcfg);
 }
 
@@ -215,6 +246,20 @@ void AppMainWindow::appendLog(const QString& s) {
     sb->setValue(sb->maximum());
 }
 
+void AppMainWindow::onAgentClipboardReceived(const QString& text) {
+    if (text == lastNetText_) return;
+    lastNetText_ = text;
+    QApplication::clipboard()->setText(text);
+}
+
+void AppMainWindow::onLocalClipboardChanged() {
+    const QString text = QApplication::clipboard()->text();
+    if (text == lastNetText_) return;  // echo from our own setText
+    if (text.isEmpty()) return;
+    lastNetText_ = text;
+    agent_.sendClipboardText(text);
+}
+
 void AppMainWindow::onConnectClicked() {
     const QString remoteId = remoteIdField_->text().trimmed();
     if (remoteId.isEmpty()) {
@@ -223,9 +268,7 @@ void AppMainWindow::onConnectClicked() {
         return;
     }
     appendLog(QStringLiteral("connecting to remote id=%1").arg(remoteId));
-    // verifyCode is recorded for the operator's mental model but the MVP
-    // relay still verifies via the master session_token. T2-7 onwards
-    // wires per-target verification.
+    rememberRecent(remoteId);
 
     // Spawn a separate viewer window. We reuse viewer's existing MainWindow
     // class (which is the full video display + input capture window). It
@@ -241,4 +284,31 @@ void AppMainWindow::onConnectClicked() {
     w->setAttribute(Qt::WA_DeleteOnClose);
     w->resize(1280, 720);
     w->show();
+}
+
+void AppMainWindow::onRecentItemActivated(QListWidgetItem* item) {
+    if (!item) return;
+    remoteIdField_->setText(item->text());
+    onConnectClicked();
+}
+
+void AppMainWindow::rememberRecent(const QString& remoteId) {
+    // Move-to-front MRU. Cap to ten entries so the list doesn't grow
+    // unbounded for someone who hops between many machines.
+    constexpr int kMaxRecents = 10;
+    local_.recentRemoteIds.removeAll(remoteId);
+    local_.recentRemoteIds.prepend(remoteId);
+    while (local_.recentRemoteIds.size() > kMaxRecents) {
+        local_.recentRemoteIds.removeLast();
+    }
+    SaveLocalConfig(local_);
+    refreshRecentList();
+}
+
+void AppMainWindow::refreshRecentList() {
+    if (!recentList_) return;
+    recentList_->clear();
+    for (const auto& id : local_.recentRemoteIds) {
+        recentList_->addItem(id);
+    }
 }

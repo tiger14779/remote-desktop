@@ -64,6 +64,27 @@ void ViewerRelayClient::Run(const Callbacks& cb) {
             case proto::MsgVideoFrame:
                 if (cb.onVideoFrame) cb.onVideoFrame(body.data(), body.size());
                 break;
+            case proto::MsgClipboardText:
+                if (cb.onClipboard) cb.onClipboard(body.data(), body.size());
+                break;
+            case proto::MsgFileXferBegin:
+            case proto::MsgFileXferChunk:
+            case proto::MsgFileXferEnd:
+                if (cb.onFileXfer) cb.onFileXfer(type, body.data(), body.size());
+                break;
+            case proto::MsgCursorShape: {
+                if (!cb.onCursorShape || body.size() < 8) break;
+                auto rd = [&](std::size_t i) {
+                    return (std::uint16_t(body[i]) << 8) | body[i + 1];
+                };
+                const int w  = rd(0);
+                const int h  = rd(2);
+                const int hx = rd(4);
+                const int hy = rd(6);
+                cb.onCursorShape(w, h, hx, hy,
+                                 body.data() + 8, body.size() - 8);
+                break;
+            }
             case proto::MsgHeartbeat:
                 break;
             default:
@@ -76,6 +97,17 @@ void ViewerRelayClient::Run(const Callbacks& cb) {
 
 bool ViewerRelayClient::SendInput(std::uint8_t type, const std::uint8_t* data,
                                   std::size_t size, std::string* errorOut) {
+    return proto::WriteFrame(sock_, type, data, size, errorOut);
+}
+
+bool ViewerRelayClient::SendClipboard(const std::uint8_t* data, std::size_t size,
+                                       std::string* errorOut) {
+    return proto::WriteFrame(sock_, proto::MsgClipboardText, data, size, errorOut);
+}
+
+bool ViewerRelayClient::SendFrameRaw(std::uint8_t type,
+                                      const std::uint8_t* data, std::size_t size,
+                                      std::string* errorOut) {
     return proto::WriteFrame(sock_, type, data, size, errorOut);
 }
 

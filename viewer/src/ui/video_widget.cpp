@@ -5,9 +5,11 @@
 #include <QPainter>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <iostream>
 
-VideoWidget::VideoWidget(QWidget* parent) : QWidget(parent) {
+VideoWidget::VideoWidget(QWidget* parent) : QOpenGLWidget(parent) {
     setAttribute(Qt::WA_OpaquePaintEvent);
     setMinimumSize(320, 180);
     setMouseTracking(true);          // mouseMoveEvent without buttons
@@ -28,6 +30,8 @@ QRect VideoWidget::videoTarget() const {
 }
 
 void VideoWidget::paintEvent(QPaintEvent*) {
+    const auto t0 = std::chrono::steady_clock::now();
+    int srcW = 0, srcH = 0, dstW = 0, dstH = 0;
     {
         QPainter p(this);
         p.fillRect(rect(), Qt::black);
@@ -37,11 +41,22 @@ void VideoWidget::paintEvent(QPaintEvent*) {
             // nearest-neighbour and text turns crunchy. With it, text edges
             // stay legible at the cost of some CPU.
             p.setRenderHint(QPainter::SmoothPixmapTransform, true);
-            p.drawImage(videoTarget(), current_);
+            const QRect t = videoTarget();
+            srcW = current_.width(); srcH = current_.height();
+            dstW = t.width();          dstH = t.height();
+            p.drawImage(t, current_);
         }
     }
     // Outside the QPainter scope so the GPU/CPU work has actually finished
     // before we tell the upstream "I'm done, send me the next frame".
+    const auto t1 = std::chrono::steady_clock::now();
+    const auto ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    if (ms > 20) {
+        std::cerr << "[viewer] slow paint: " << ms << "ms (src "
+                  << srcW << "x" << srcH << " -> dst "
+                  << dstW << "x" << dstH << ")\n";
+    }
     emit framePainted();
 }
 

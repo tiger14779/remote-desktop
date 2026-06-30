@@ -15,7 +15,7 @@ endif()
 if(NOT CMAKE_PREFIX_PATH AND DEFINED ENV{QT_DIR})
     list(APPEND CMAKE_PREFIX_PATH "$ENV{QT_DIR}")
 endif()
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets)
 qt_standard_project_setup()
 
 # Bring agent_core + viewer_core + shared_net into this build by including
@@ -40,6 +40,7 @@ target_link_libraries(app PRIVATE
     agent_core
     viewer_core
     Qt6::Widgets
+    Qt6::OpenGLWidgets
 )
 # Pull in viewer's UI sources directly (they're not in viewer_core because
 # viewer_core is the no-Qt subset; the Qt classes live in viewer/src/ui/).
@@ -47,6 +48,7 @@ target_sources(app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../viewer/src/ui/video_widget.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../viewer/src/ui/main_window.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../viewer/src/ui/viewer_session.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../viewer/src/ui/clipboard_file_xfer.cpp
 )
 target_include_directories(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../viewer/src)
 

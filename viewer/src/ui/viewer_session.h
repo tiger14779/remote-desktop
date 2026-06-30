@@ -3,6 +3,7 @@
 #include "decode/h264_decoder.h"
 #include "net/relay_client.h"
 
+#include <QCursor>
 #include <QImage>
 #include <QObject>
 #include <QString>
@@ -39,6 +40,15 @@ public:
     void sendMouseButton(std::uint8_t button, bool down);
     void sendKey(std::uint16_t vkCode, bool down);
 
+    // Pushes the viewer-side clipboard text to the agent. No-op if the
+    // session is not active.
+    void sendClipboardText(const QString& text);
+
+    // Generic frame writer (used by ClipboardFileXfer). Safe to call from
+    // any thread — wraps ViewerRelayClient::SendFrameRaw which holds the
+    // write mutex internally.
+    void sendFrameRaw(std::uint8_t type, const QByteArray& payload);
+
     // Called on the GUI thread by VideoWidget after paintEvent finishes.
     // Just clears the framePending_ flag so the next decoded frame is
     // allowed through. Direct-connected so it's a cheap atomic flip.
@@ -51,6 +61,15 @@ signals:
     void status(const QString& s);
     void frameReady(const QImage& img);
     void disconnected(const QString& reason);
+    // Fired on the GUI thread when the agent pushes its clipboard contents
+    // into this viewer. Subscribers should set the local clipboard.
+    void clipboardReceived(const QString& text);
+    // Fired on the GUI thread when the agent reports a new cursor shape.
+    // Subscribers should set the new shape on the video widget.
+    void cursorShapeReceived(const QCursor& cursor);
+    // FILE_XFER_BEGIN/CHUNK/END from the agent. Payload is the raw frame
+    // body — ClipboardFileXfer parses it.
+    void fileXferFrameReceived(std::uint8_t type, const QByteArray& payload);
 
 private:
     // Sleeps for up to dt, but returns early if requestStop() fires.
@@ -67,9 +86,20 @@ private:
 
     // GUI backpressure. Network thread sets true before emit, GUI thread
     // clears it in onFramePainted. If true when a new frame is decoded,
-    // we drop that frame instead of queueing it — prevents Qt's signal
-    // queue from accumulating frames when paintEvent at 4K can't keep up.
+    // we STASH it (overwriting any previous stash) and emit it after the
+    // in-flight paint finishes. The stash is critical: at the end of a
+    // fast drag, the LAST frame arrives while we're still painting an
+    // intermediate one — if we just dropped it like the old code did, the
+    // viewer would forever show the intermediate state and never the
+    // window's final position (the "stuck mid-drag" symptom).
     std::atomic<bool> framePending_{false};
+    std::mutex stashMu_;
+    QImage stashedImg_;
+    bool hasStash_ = false;
+
+    // Diagnostic: how many frames the paint backpressure absorbed (replaced
+    // by a fresher one in the stash) since the last log.
+    std::atomic<int> droppedFrames_{0};
 };
 
 Q_DECLARE_METATYPE(ViewerSession::Config)
