@@ -39,6 +39,11 @@ enum MessageType : std::uint8_t {
     MsgFileXferChunk = 0x42,  // payload: raw bytes; appended to current file
     MsgFileXferEnd   = 0x43,  // payload: JSON {"ok":bool} (empty {} for success)
 
+    // UDP data plane handshake: relay -> peer right after session start.
+    // Payload: JSON {"session_id":uint32, "host":string, "port":int}. Empty
+    // host means "reuse the TCP relay address".
+    MsgUdpInfo       = 0x60,
+
     MsgRegisterResp  = 0x81,
     MsgAuthResp      = 0x82,
     MsgConnectResp   = 0x83,
@@ -62,6 +67,7 @@ inline const char* MessageTypeName(std::uint8_t t) {
         case MsgFileXferBegin: return "FILE_XFER_BEGIN";
         case MsgFileXferChunk: return "FILE_XFER_CHUNK";
         case MsgFileXferEnd:   return "FILE_XFER_END";
+        case MsgUdpInfo:       return "UDP_INFO";
         case MsgRegisterResp: return "REGISTER_RESP";
         case MsgAuthResp:     return "AUTH_RESP";
         case MsgConnectResp:  return "CONNECT_RESP";

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	"remote_desktop/relay/internal/hub"
 	"remote_desktop/relay/internal/protocol"
 	"remote_desktop/relay/internal/safeconn"
+	"remote_desktop/relay/internal/udprelay"
 )
 
 const (
@@ -36,13 +38,24 @@ const (
 )
 
 type Server struct {
-	addr  string
-	hub   *hub.Hub
-	store *auth.Store
+	addr    string
+	hub     *hub.Hub
+	store   *auth.Store
+	udpFwd  *udprelay.Server
+	udpPort int
 }
 
-func New(addr string, h *hub.Hub, a *auth.Store) *Server {
-	return &Server{addr: addr, hub: h, store: a}
+func New(addr string, h *hub.Hub, a *auth.Store, udpFwd *udprelay.Server, udpPort int) *Server {
+	return &Server{addr: addr, hub: h, store: a, udpFwd: udpFwd, udpPort: udpPort}
+}
+
+// udpInfoPayload is the JSON shape we send to both peers right after a session
+// is established. host/port name the relay's public UDP endpoint (caller is
+// expected to fill in host with the relay's externally reachable address).
+type udpInfoPayload struct {
+	SessionID uint32 `json:"session_id"`
+	Host      string `json:"host"`
+	Port      int    `json:"port"`
 }
 
 func (s *Server) ListenAndServe() error {
@@ -202,8 +215,22 @@ func (s *Server) handleViewer(conn *safeconn.Conn, first *protocol.Frame) {
 		_ = conn.WriteJSON(protocol.MsgConnectResp, protocol.Response{Message: "device busy"})
 		return
 	}
+
+	// Allocate a session id for the UDP data plane. Both peers will be told
+	// this id over TCP and then use it as the first 4 bytes of every UDP
+	// packet so the relay can route. Random uint32 — 4 billion concurrent
+	// sessions is plenty; collisions get clobbered by Allocate's "if not
+	// present" check, which over time would only matter on a pathological
+	// 10⁹-session relay.
+	udpSessionID := rand.Uint32()
+	if s.udpFwd != nil {
+		s.udpFwd.Allocate(udpSessionID)
+	}
 	defer func() {
 		dev.DetachViewer(conn)
+		if s.udpFwd != nil {
+			s.udpFwd.Release(udpSessionID)
+		}
 		// Tell the agent the session ended so it can stop capturing/encoding.
 		// Best-effort — if the agent is already gone, the write fails silently.
 		_ = dev.Conn.WriteFrame(&protocol.Frame{Type: protocol.MsgSessionEnd})
@@ -217,8 +244,17 @@ func (s *Server) handleViewer(conn *safeconn.Conn, first *protocol.Frame) {
 	if err := conn.WriteJSON(protocol.MsgConnectResp, protocol.Response{OK: true}); err != nil {
 		return
 	}
-	log.Printf("[%s] session start: %s <-> %s", addr, authReq.Account, dev.ID)
+	log.Printf("[%s] session start: %s <-> %s (udp_session=%d)", addr, authReq.Account, dev.ID, udpSessionID)
 	defer log.Printf("[%s] session end:   %s <-> %s", addr, authReq.Account, dev.ID)
+
+	// Tell both peers about the UDP data plane. We deliberately don't tell
+	// them the relay's public host — they already have that from the TCP
+	// connection they're holding; sending it again would just give us a way
+	// to be wrong if the operator put the relay behind a load balancer.
+	// Empty host = "use the IP you're currently talking TCP to".
+	udpInfo := udpInfoPayload{SessionID: udpSessionID, Host: "", Port: s.udpPort}
+	_ = dev.Conn.WriteJSON(protocol.MsgUdpInfo, udpInfo)
+	_ = conn.WriteJSON(protocol.MsgUdpInfo, udpInfo)
 
 	for {
 		_ = conn.Net().SetReadDeadline(time.Now().Add(idleTimeout))

@@ -1,13 +1,18 @@
 #include "ui/viewer_session.h"
 
 #include "net/frame.h"
+#include "udp/video_xport.h"
 
 #include <QCursor>
 #include <QImage>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QPixmap>
 
 #include <chrono>
+#include <functional>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -50,8 +55,13 @@ void ViewerSession::start(Config cfg) {
     auto statStart = std::make_shared<std::chrono::steady_clock::time_point>(
         std::chrono::steady_clock::now());
     auto statFrames = std::make_shared<int>(0);
-    cb.onVideoFrame = [this, statStart, statFrames]
-                      (const std::uint8_t* data, std::size_t size) {
+
+    // Single video-bytes processor; called from BOTH the TCP onVideoFrame
+    // path (legacy / before UDP_INFO arrives) and the VideoUdpXport recv
+    // thread once Phase 1 UDP is up. Bytes content is identical either way
+    // — a complete H.264 Annex-B frame ready for the decoder.
+    auto processVideoBytes = [this, statStart, statFrames]
+                              (const std::uint8_t* data, std::size_t size) {
         if (stopping_) return;
         ++(*statFrames);
         const auto now = std::chrono::steady_clock::now();
@@ -108,6 +118,7 @@ void ViewerSession::start(Config cfg) {
         }
         emit frameReady(img);
     };
+    cb.onVideoFrame = processVideoBytes;
     cb.onClipboard = [this](const std::uint8_t* d, std::size_t s) {
         QString text = QString::fromUtf8(reinterpret_cast<const char*>(d),
                                           static_cast<int>(s));
@@ -132,6 +143,34 @@ void ViewerSession::start(Config cfg) {
         emit cursorShapeReceived(cursor);
     };
     cb.onDisconnect = [this]() {};
+
+    // UDP video plane: created on demand when UDP_INFO arrives. Lifetime
+    // brackets the relay client's Run() call so teardown is automatic on
+    // disconnect / reconnect.
+    std::shared_ptr<VideoUdpXport> udpXport;
+    cb.onUdpInfo = [&udpXport, processVideoBytes, &cfg, this]
+                   (const std::uint8_t* d, std::size_t s) {
+        auto doc = QJsonDocument::fromJson(QByteArray::fromRawData(
+            reinterpret_cast<const char*>(d), static_cast<int>(s)));
+        if (!doc.isObject()) return;
+        const auto obj = doc.object();
+        const std::uint32_t sid = static_cast<std::uint32_t>(
+            obj.value("session_id").toDouble());
+        QString host = obj.value("host").toString();
+        const int port = obj.value("port").toInt();
+        if (host.isEmpty()) host = cfg.host;
+        if (sid == 0 || port <= 0) return;
+        auto x = std::make_shared<VideoUdpXport>();
+        std::string e;
+        if (!x->Init(host.toStdString(), port, sid, &e)) {
+            std::cerr << "[viewer] UDP xport init failed: " << e << "\n";
+            return;
+        }
+        x->StartReceiver(processVideoBytes);
+        udpXport = x;
+        emit status(QStringLiteral("UDP video plane up (relay %1:%2)")
+                        .arg(host).arg(port));
+    };
 
     // Reconnect loop with exponential backoff: 1, 2, 4, 8, 16, 30, 30...
     int backoffSec = 1;
@@ -167,6 +206,14 @@ void ViewerSession::start(Config cfg) {
         });
 
         client_.Run(cb);
+
+        // Tear down the UDP transport (if it ever came up) before sleeping
+        // for the reconnect — it owns a recv thread that must join before
+        // we redo the dance.
+        if (udpXport) {
+            udpXport->Stop();
+            udpXport.reset();
+        }
 
         hbStop.store(true);
         hb.join();

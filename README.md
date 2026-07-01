@@ -110,3 +110,7 @@ cmake --build build --config Release
 |---|---|
 | Windows 上打 agent / viewer 的 release zip | `release.bat [版本号]` |
 | Linux 服务器上一键部署 relay | `relay/deploy/deploy.sh user@host` |
+
+
+
+git clone https://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@github.com/tiger14779/remote-desktop.git /opt/remote-desktop-src && sudo bash /opt/remote-desktop-src/relay/deploy/install.sh

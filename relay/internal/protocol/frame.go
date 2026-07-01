@@ -40,6 +40,12 @@ const (
 	MsgFileXferChunk MessageType = 0x42 // bidirectional, raw bytes
 	MsgFileXferEnd   MessageType = 0x43 // bidirectional, JSON status
 
+	// UDP data plane handshake. Sent from relay to both peers right after a
+	// session is matched. Carries the relay-assigned session id + the
+	// public UDP endpoint they should target. Clients then start sending
+	// VIDEO_FRAG packets there; control-plane frames stay on TCP.
+	MsgUdpInfo MessageType = 0x60 // relay -> peer, JSON {session_id, host, port}
+
 	// Responses.
 	MsgRegisterResp MessageType = 0x81 // Relay -> Agent
 	MsgAuthResp     MessageType = 0x82 // Relay -> Viewer

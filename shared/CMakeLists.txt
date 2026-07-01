@@ -7,6 +7,8 @@ cmake_minimum_required(VERSION 3.20)
 add_library(shared_net STATIC
     net/tcp_client.cpp
     net/frame.cpp
+    udp/udp_socket.cpp
+    udp/video_xport.cpp
 )
 target_include_directories(shared_net PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 if(MSVC)

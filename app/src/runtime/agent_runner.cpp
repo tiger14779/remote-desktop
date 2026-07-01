@@ -5,6 +5,10 @@
 #include "input/input_injector.h"
 #include "net/frame.h"
 #include "net/agent_relay_client.h"
+#include "udp/video_xport.h"
+
+#include <QJsonDocument>
+#include <QJsonObject>
 
 #include <algorithm>
 #include <atomic>
@@ -31,6 +35,15 @@ public:
           fps_(fps), bitrateKbps_(bitrateKbps), maxHeight_(maxHeight) {}
 
     void Start() { thread_ = std::thread([this]() { run(); }); }
+
+    // Swap the video send path to a UDP transport (Phase 1 P2P/UDP-relay
+    // upgrade). Null = fall back to the old TCP MsgVideoFrame path. Safe to
+    // call from any thread; the pump picks up the change before its next
+    // encode-and-send.
+    void SetUdpXport(VideoUdpXport* udp) {
+        std::lock_guard<std::mutex> g(xportMu_);
+        udp_ = udp;
+    }
 
     void Stop() {
         {
@@ -234,9 +247,24 @@ private:
             return false;
         }
         const auto tEnc = std::chrono::steady_clock::now();
+        VideoUdpXport* xport = nullptr;
+        {
+            std::lock_guard<std::mutex> g(xportMu_);
+            xport = udp_;
+        }
         std::size_t total = 0;
         for (const auto& p : pkts) {
-            if (!client_->SendVideoFrame(p.data(), p.size(), err)) return false;
+            bool ok;
+            if (xport) {
+                // UDP path: one xport->SendFrame per encoded NAL — the xport
+                // internally fragments to fit UDP MTU. Failure on UDP is
+                // non-fatal (datagrams are unreliable anyway), so we just
+                // log via err and keep going.
+                ok = xport->SendFrame(p.data(), p.size(), err);
+            } else {
+                ok = client_->SendVideoFrame(p.data(), p.size(), err);
+            }
+            if (!ok) return false;
             total += p.size();
         }
         const auto tSent = std::chrono::steady_clock::now();
@@ -256,6 +284,12 @@ private:
     std::condition_variable cv_;
     bool sessionActive_ = false;
     bool shouldExit_ = false;
+
+    // UDP video path (Phase 1). Owned by AgentRunner::runLoop; we just hold
+    // a weak pointer here. nullptr means "fall back to TCP video frames" —
+    // the state the pump runs in until UDP_INFO is received.
+    std::mutex xportMu_;
+    VideoUdpXport* udp_ = nullptr;
 };
 
 } // namespace
@@ -407,7 +441,44 @@ void AgentRunner::runLoop(Config cfg) {
                 type,
                 QByteArray(reinterpret_cast<const char*>(d), static_cast<int>(s)));
         };
+        // UDP_INFO: relay told us session_id + UDP port. Spin up the UDP
+        // video transport and hand it to the pump so subsequent
+        // SendVideoFrame goes over UDP instead of TCP.
+        std::unique_ptr<VideoUdpXport> udpXport;
+        cb.onUdpInfo = [&](const std::uint8_t* d, std::size_t s) {
+            auto doc = QJsonDocument::fromJson(QByteArray::fromRawData(
+                reinterpret_cast<const char*>(d), static_cast<int>(s)));
+            if (!doc.isObject()) return;
+            const auto obj = doc.object();
+            const std::uint32_t sid = static_cast<std::uint32_t>(
+                obj.value("session_id").toDouble());
+            QString host = obj.value("host").toString();
+            const int port = obj.value("port").toInt();
+            // Empty host = "reuse the TCP relay address" — the relay's
+            // signaling layer deliberately doesn't repeat it.
+            if (host.isEmpty()) host = cfg.relayHost;
+            if (sid == 0 || port <= 0) return;
+            auto x = std::make_unique<VideoUdpXport>();
+            std::string e;
+            if (!x->Init(host.toStdString(), port, sid, &e)) {
+                std::cerr << "[agent] UDP xport init failed: " << e << "\n";
+                return;
+            }
+            // Agent SENDS video — we don't need an inbound callback (the
+            // viewer is the only other peer and it doesn't push frames at
+            // us). But we still start the recv loop so the periodic
+            // REGISTER inside it keeps the relay map fresh.
+            x->StartReceiver([](const std::uint8_t*, std::size_t) {});
+            pump.SetUdpXport(x.get());
+            udpXport = std::move(x);
+            std::cerr << "[agent] UDP video plane up — session_id=" << sid
+                      << " relay=" << host.toStdString() << ":" << port << "\n";
+        };
         client.Run(cb);
+        // Tear down the UDP xport (if any) before the pump is stopped so
+        // it can't be racing a send.
+        pump.SetUdpXport(nullptr);
+        udpXport.reset();
 
         {
             std::lock_guard<std::mutex> g(clientMu_);

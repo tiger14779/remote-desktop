@@ -33,6 +33,10 @@ public:
         std::function<void(std::uint8_t type,
                            const std::uint8_t* data,
                            std::size_t size)> onFileXfer;
+        // Inbound UDP_INFO from relay: carries session_id + relay UDP port
+        // the agent should target for its video data plane. Payload is the
+        // JSON body, caller parses.
+        std::function<void(const std::uint8_t* data, std::size_t size)> onUdpInfo;
     };
 
     bool ConnectAndRegister(const Config& cfg, std::string* errorOut);

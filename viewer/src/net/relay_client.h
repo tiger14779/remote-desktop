@@ -32,6 +32,9 @@ public:
         std::function<void(std::uint8_t type,
                            const std::uint8_t* data,
                            std::size_t size)> onFileXfer;
+        // Inbound UDP_INFO from relay (after CONNECT succeeds): JSON payload
+        // carrying session_id + the relay's UDP port for the video data plane.
+        std::function<void(const std::uint8_t* data, std::size_t size)> onUdpInfo;
         std::function<void()> onDisconnect;
     };
 

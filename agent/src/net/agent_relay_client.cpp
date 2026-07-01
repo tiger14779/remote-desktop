@@ -66,6 +66,9 @@ void RelayClient::Run(const Callbacks& cb) {
             case proto::MsgFileXferEnd:
                 if (cb.onFileXfer) cb.onFileXfer(type, body.data(), body.size());
                 break;
+            case proto::MsgUdpInfo:
+                if (cb.onUdpInfo) cb.onUdpInfo(body.data(), body.size());
+                break;
             case proto::MsgHeartbeat:
                 // Relay reflects ours; nothing to do.
                 break;
