@@ -70,12 +70,12 @@ public:
     // exposing the setter for future dynamic-relay-selection scenarios.
     void SetRelay(const std::string& host, int port);
 
-    // Register a peer candidate to probe. Called from TCP MsgUdpCandidates
-    // dispatch. Spawns a background probe: sends kPktProbe packets to this
-    // endpoint every ~200ms until the peer replies with kPktProbeAck (at
-    // which point we mark direct and re-target the data plane there) or
-    // Stop() is called.
-    void StartDirectProbe(const std::string& peerHost, int peerPort);
+    // Add a peer endpoint to probe. Called from TCP MsgUdpCandidates and
+    // MsgUdpMyCandidates dispatch. Each candidate is probed every ~150ms
+    // for a 5-second window from the last add. Whichever answers first
+    // wins and the data plane retargets there; the losers just get their
+    // last few probes dropped.
+    void AddDirectCandidate(const std::string& peerHost, int peerPort);
 
     // Optional callback fired on the recv thread the moment kPktProbeAck
     // proves the direct path is up. GUI code can queue-connect to log
@@ -85,6 +85,10 @@ public:
     // Reports whether the direct (P2P) path is currently in use for
     // outbound sends. Used by diagnostics.
     bool IsDirect() const { return directUp_.load(); }
+
+    // OS-assigned local UDP port. Non-zero once Init succeeds. Sent to the
+    // peer as part of the LAN candidate list so it knows where to probe.
+    int LocalPort() const;
 
     // Spawn the recv loop. Callback fires on the recv thread; the caller is
     // responsible for cross-thread handoff (e.g., a QueuedConnection).
@@ -123,9 +127,9 @@ private:
     UdpSocket::Endpoint dst_;
     UdpSocket::Endpoint relay_;
 
-    // Peer candidate we're currently trying to punch to. Empty means "no
-    // direct probe scheduled". Set by StartDirectProbe.
-    UdpSocket::Endpoint peerCandidate_;
+    // All peer candidates we're currently trying to punch to (may include
+    // LAN IPs + one reflex address). Empty = no probing scheduled.
+    std::vector<UdpSocket::Endpoint> peerCandidates_;
     std::atomic<bool> directUp_{false};
     std::chrono::steady_clock::time_point probeUntil_;
 

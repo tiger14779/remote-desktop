@@ -72,6 +72,9 @@ void RelayClient::Run(const Callbacks& cb) {
             case proto::MsgUdpCandidates:
                 if (cb.onUdpCandidates) cb.onUdpCandidates(body.data(), body.size());
                 break;
+            case proto::MsgUdpMyCandidates:
+                if (cb.onUdpPeerLan) cb.onUdpPeerLan(body.data(), body.size());
+                break;
             case proto::MsgHeartbeat:
                 // Relay reflects ours; nothing to do.
                 break;

@@ -62,6 +62,8 @@ bool VideoUdpXport::Init(const std::string& relayHost, int relayPort,
     return true;
 }
 
+int VideoUdpXport::LocalPort() const { return sock_.LocalPort(); }
+
 void VideoUdpXport::SetRelay(const std::string& host, int port) {
     std::lock_guard<std::mutex> g(dstMu_);
     relay_.host = host;
@@ -72,15 +74,24 @@ void VideoUdpXport::SetRelay(const std::string& host, int port) {
     }
 }
 
-void VideoUdpXport::StartDirectProbe(const std::string& peerHost, int peerPort) {
+void VideoUdpXport::AddDirectCandidate(const std::string& peerHost, int peerPort) {
+    if (directUp_.load()) return;  // already picked a winner
+    UdpSocket::Endpoint ep;
+    ep.host = peerHost;
+    ep.port = peerPort;
     {
         std::lock_guard<std::mutex> g(dstMu_);
-        peerCandidate_.host = peerHost;
-        peerCandidate_.port = peerPort;
+        // De-dup: a peer that reports the same LAN IP twice (rare, but
+        // possible when both come from different messages) shouldn't cause
+        // us to double-probe.
+        for (const auto& e : peerCandidates_) {
+            if (e.host == ep.host && e.port == ep.port) return;
+        }
+        peerCandidates_.push_back(ep);
     }
-    // 5-second window is our punching budget. Longer wastes packets on
-    // NATs that clearly won't cooperate; shorter risks giving up on high-
-    // RTT paths that just needed one more retry.
+    // 5-second window is our punching budget from THIS add — a late arrival
+    // (e.g., peer's LAN candidate message shows up 100ms after the relay
+    // reflex one) refreshes the deadline so it gets a fair chance.
     probeUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
 }
 
@@ -180,25 +191,24 @@ void VideoUdpXport::recvLoop() {
             lastRegister = now;
         }
 
-        // Send periodic NAT-T probes while the window is open and we don't
-        // yet have a confirmed direct path. Cheap enough to fire on every
-        // outer loop tick as long as the interval says "yes".
-        if (!directUp_.load()) {
-            UdpSocket::Endpoint cand;
-            bool haveCand = false;
+        // Send periodic NAT-T probes to every candidate while the window is
+        // open and we don't yet have a confirmed direct path. LAN
+        // candidates are near-free — they'll either punch through instantly
+        // (same-subnet case) or vanish (routing sends them nowhere).
+        if (!directUp_.load() && now - lastProbe >= kProbeInterval) {
+            std::vector<UdpSocket::Endpoint> cands;
             {
                 std::lock_guard<std::mutex> g(dstMu_);
-                if (!peerCandidate_.host.empty() && now < probeUntil_) {
-                    cand = peerCandidate_;
-                    haveCand = true;
-                }
+                if (now < probeUntil_) cands = peerCandidates_;
             }
-            if (haveCand && now - lastProbe >= kProbeInterval) {
+            if (!cands.empty()) {
                 std::uint8_t probe[5];
                 writeBE32(&probe[0], sessionId_);
                 probe[4] = kPktProbe;
-                std::string e;
-                sock_.SendTo(cand, probe, sizeof(probe), &e);
+                for (const auto& c : cands) {
+                    std::string e;
+                    sock_.SendTo(c, probe, sizeof(probe), &e);
+                }
                 lastProbe = now;
             }
         }

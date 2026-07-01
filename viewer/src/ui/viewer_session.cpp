@@ -1,10 +1,12 @@
 #include "ui/viewer_session.h"
 
 #include "net/frame.h"
+#include "udp/lan_ips.h"
 #include "udp/video_xport.h"
 
 #include <QCursor>
 #include <QImage>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPixmap>
@@ -180,20 +182,52 @@ void ViewerSession::start(Config cfg) {
                         .arg(host).arg(port));
         std::cerr << "[viewer] UDP video plane up (session_id=" << sid
                   << " relay=" << host.toStdString() << ":" << port << ")\n";
+
+        // Send our LAN candidates to the peer over the relay's TCP forward.
+        // Same-LAN case: the peer will probe our 192.168.x.y and get an
+        // instant reply, punching direct with < 1ms latency.
+        const int localUdpPort = udpXport->LocalPort();
+        const auto lanIps = udp_lan::LocalIPv4Addresses();
+        QJsonArray arr;
+        for (const auto& ip : lanIps) {
+            QJsonObject o;
+            o["host"] = QString::fromStdString(ip);
+            o["port"] = localUdpPort;
+            arr.append(o);
+        }
+        QJsonObject root;
+        root["candidates"] = arr;
+        const QByteArray json = QJsonDocument(root).toJson(QJsonDocument::Compact);
+        std::string sendErr;
+        client_.SendFrameRaw(proto::MsgUdpMyCandidates,
+                              reinterpret_cast<const std::uint8_t*>(json.constData()),
+                              static_cast<std::size_t>(json.size()), &sendErr);
+        std::cerr << "[viewer] advertised " << lanIps.size()
+                  << " LAN candidate(s) via TCP\n";
     };
-    cb.onUdpCandidates = [&udpXport, this](const std::uint8_t* d, std::size_t s) {
+    // Shared parser for both flavours of candidate lists.
+    auto addCandidates = [&udpXport, this](const std::uint8_t* d, std::size_t s,
+                                             const char* origin) {
         if (!udpXport) return;
         auto doc = QJsonDocument::fromJson(QByteArray::fromRawData(
             reinterpret_cast<const char*>(d), static_cast<int>(s)));
         if (!doc.isObject()) return;
-        const auto obj = doc.object();
-        const QString host = obj.value("peer_host").toString();
-        const int port = obj.value("peer_port").toInt();
-        if (host.isEmpty() || port <= 0) return;
-        udpXport->StartDirectProbe(host.toStdString(), port);
-        std::cerr << "[viewer] NAT-T probing peer " << host.toStdString()
-                  << ":" << port << "\n";
-        emit status(QStringLiteral("NAT-T probing %1:%2 ...").arg(host).arg(port));
+        const auto arr = doc.object().value("candidates").toArray();
+        for (const auto& v : arr) {
+            const auto obj = v.toObject();
+            const QString host = obj.value("host").toString();
+            const int port = obj.value("port").toInt();
+            if (host.isEmpty() || port <= 0) continue;
+            udpXport->AddDirectCandidate(host.toStdString(), port);
+            std::cerr << "[viewer] NAT-T probing " << host.toStdString()
+                      << ":" << port << " (" << origin << ")\n";
+        }
+    };
+    cb.onUdpCandidates = [addCandidates](const std::uint8_t* d, std::size_t s) {
+        addCandidates(d, s, "reflex");
+    };
+    cb.onUdpPeerLan = [addCandidates](const std::uint8_t* d, std::size_t s) {
+        addCandidates(d, s, "lan");
     };
 
     // Reconnect loop with exponential backoff: 1, 2, 4, 8, 16, 30, 30...

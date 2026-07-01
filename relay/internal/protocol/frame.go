@@ -50,7 +50,8 @@ const (
 	// arrived — relay tells each peer the OTHER'S observed public UDP
 	// endpoint so they can try to punch a direct hole and skip the relay
 	// hop entirely. JSON: {"peer_host":str, "peer_port":int}.
-	MsgUdpCandidates MessageType = 0x61
+	MsgUdpCandidates   MessageType = 0x61 // relay -> peer, JSON {candidates:[{host,port}]}
+	MsgUdpMyCandidates MessageType = 0x62 // peer -> peer via relay, JSON same shape (LAN)
 
 	// Responses.
 	MsgRegisterResp MessageType = 0x81 // Relay -> Agent
@@ -148,6 +149,8 @@ func (t MessageType) String() string {
 		return "UDP_INFO"
 	case MsgUdpCandidates:
 		return "UDP_CANDIDATES"
+	case MsgUdpMyCandidates:
+		return "UDP_MY_CANDIDATES"
 	case MsgRegisterResp:
 		return "REGISTER_RESP"
 	case MsgAuthResp:

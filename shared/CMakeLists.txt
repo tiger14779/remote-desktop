@@ -9,6 +9,7 @@ add_library(shared_net STATIC
     net/frame.cpp
     udp/udp_socket.cpp
     udp/video_xport.cpp
+    udp/lan_ips.cpp
 )
 target_include_directories(shared_net PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 if(MSVC)

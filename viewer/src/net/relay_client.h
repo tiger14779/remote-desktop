@@ -37,6 +37,8 @@ public:
         std::function<void(const std::uint8_t* data, std::size_t size)> onUdpInfo;
         // UDP_CANDIDATES: peer's public UDP endpoint (for NAT-T probing).
         std::function<void(const std::uint8_t* data, std::size_t size)> onUdpCandidates;
+        // UDP_MY_CANDIDATES: peer's LAN endpoints (forwarded by relay).
+        std::function<void(const std::uint8_t* data, std::size_t size)> onUdpPeerLan;
         std::function<void()> onDisconnect;
     };
 

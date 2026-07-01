@@ -40,6 +40,9 @@ public:
         // UDP_CANDIDATES: relay tells us the peer's public UDP endpoint.
         // Agent side kicks off NAT-T probing to that endpoint.
         std::function<void(const std::uint8_t* data, std::size_t size)> onUdpCandidates;
+        // UDP_MY_CANDIDATES: peer told us (via relay forward) about its own
+        // local candidates (LAN IPs) we should also try probing.
+        std::function<void(const std::uint8_t* data, std::size_t size)> onUdpPeerLan;
     };
 
     bool ConnectAndRegister(const Config& cfg, std::string* errorOut);

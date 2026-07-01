@@ -58,11 +58,16 @@ type udpInfoPayload struct {
 	Port      int    `json:"port"`
 }
 
-// udpCandidatesPayload tells one peer where to find the other for NAT-T
-// probing. Fired only after both peers have registered UDP endpoints.
+// udpCandidatesPayload tells one peer a list of endpoints to probe for NAT-T.
+// Shape is the same one clients use for peer-to-peer LAN candidate exchange
+// (MsgUdpMyCandidates); a single receiver handles both flavours by adding to
+// its probe list.
+type udpCandidate struct {
+	Host string `json:"host"`
+	Port int    `json:"port"`
+}
 type udpCandidatesPayload struct {
-	PeerHost string `json:"peer_host"`
-	PeerPort int    `json:"peer_port"`
+	Candidates []udpCandidate `json:"candidates"`
 }
 
 func (s *Server) ListenAndServe() error {
@@ -285,9 +290,13 @@ func (s *Server) handleViewer(conn *safeconn.Conn, first *protocol.Frame) {
 			}
 			// Tell each side about the OTHER'S reflexive address.
 			_ = agentConn.WriteJSON(protocol.MsgUdpCandidates,
-				udpCandidatesPayload{PeerHost: viewerEP.IP.String(), PeerPort: viewerEP.Port})
+				udpCandidatesPayload{Candidates: []udpCandidate{
+					{Host: viewerEP.IP.String(), Port: viewerEP.Port},
+				}})
 			_ = viewerConn.WriteJSON(protocol.MsgUdpCandidates,
-				udpCandidatesPayload{PeerHost: agentEP.IP.String(), PeerPort: agentEP.Port})
+				udpCandidatesPayload{Candidates: []udpCandidate{
+					{Host: agentEP.IP.String(), Port: agentEP.Port},
+				}})
 			log.Printf("[%s] sent UDP_CANDIDATES: agent=%s viewer=%s", addr, agentEP, viewerEP)
 		}()
 	}

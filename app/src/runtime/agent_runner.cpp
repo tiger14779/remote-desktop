@@ -5,8 +5,10 @@
 #include "input/input_injector.h"
 #include "net/frame.h"
 #include "net/agent_relay_client.h"
+#include "udp/lan_ips.h"
 #include "udp/video_xport.h"
 
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 
@@ -478,19 +480,54 @@ void AgentRunner::runLoop(Config cfg) {
             udpXport = std::move(x);
             std::cerr << "[agent] UDP video plane up — session_id=" << sid
                       << " relay=" << host.toStdString() << ":" << port << "\n";
+
+            // Advertise our LAN candidates to the peer via the relay's TCP
+            // forward. Peer's client will add them to its probe list; if
+            // we're same-LAN, one of these will win and we get sub-ms
+            // direct without touching any router hairpin.
+            const int localUdpPort = udpXport->LocalPort();
+            const auto lanIps = udp_lan::LocalIPv4Addresses();
+            QJsonArray arr;
+            for (const auto& ip : lanIps) {
+                QJsonObject o;
+                o["host"] = QString::fromStdString(ip);
+                o["port"] = localUdpPort;
+                arr.append(o);
+            }
+            QJsonObject root;
+            root["candidates"] = arr;
+            const QByteArray json = QJsonDocument(root).toJson(QJsonDocument::Compact);
+            std::string err2;
+            client.SendFrameRaw(proto::MsgUdpMyCandidates,
+                                 reinterpret_cast<const std::uint8_t*>(json.constData()),
+                                 static_cast<std::size_t>(json.size()), &err2);
+            std::cerr << "[agent] advertised " << lanIps.size()
+                      << " LAN candidate(s) via TCP\n";
         };
-        cb.onUdpCandidates = [&udpXport](const std::uint8_t* d, std::size_t s) {
-            if (!udpXport) return;  // UDP_INFO must have arrived first
+        // Shared parser for BOTH relay-issued reflex candidates and peer-
+        // forwarded LAN candidates — payload shape is identical.
+        auto addCandidates = [&udpXport](const std::uint8_t* d, std::size_t s,
+                                          const char* origin) {
+            if (!udpXport) return;
             auto doc = QJsonDocument::fromJson(QByteArray::fromRawData(
                 reinterpret_cast<const char*>(d), static_cast<int>(s)));
             if (!doc.isObject()) return;
-            const auto obj = doc.object();
-            const QString host = obj.value("peer_host").toString();
-            const int port = obj.value("peer_port").toInt();
-            if (host.isEmpty() || port <= 0) return;
-            udpXport->StartDirectProbe(host.toStdString(), port);
-            std::cerr << "[agent] NAT-T probing peer " << host.toStdString()
-                      << ":" << port << "\n";
+            const auto arr = doc.object().value("candidates").toArray();
+            for (const auto& v : arr) {
+                const auto obj = v.toObject();
+                const QString host = obj.value("host").toString();
+                const int port = obj.value("port").toInt();
+                if (host.isEmpty() || port <= 0) continue;
+                udpXport->AddDirectCandidate(host.toStdString(), port);
+                std::cerr << "[agent] NAT-T probing " << host.toStdString()
+                          << ":" << port << " (" << origin << ")\n";
+            }
+        };
+        cb.onUdpCandidates = [addCandidates](const std::uint8_t* d, std::size_t s) {
+            addCandidates(d, s, "reflex");
+        };
+        cb.onUdpPeerLan = [addCandidates](const std::uint8_t* d, std::size_t s) {
+            addCandidates(d, s, "lan");
         };
         client.Run(cb);
         // Tear down the UDP xport (if any) before the pump is stopped so
