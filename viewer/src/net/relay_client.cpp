@@ -75,6 +75,9 @@ void ViewerRelayClient::Run(const Callbacks& cb) {
             case proto::MsgUdpInfo:
                 if (cb.onUdpInfo) cb.onUdpInfo(body.data(), body.size());
                 break;
+            case proto::MsgUdpCandidates:
+                if (cb.onUdpCandidates) cb.onUdpCandidates(body.data(), body.size());
+                break;
             case proto::MsgCursorShape: {
                 if (!cb.onCursorShape || body.size() < 8) break;
                 auto rd = [&](std::size_t i) {

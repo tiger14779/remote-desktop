@@ -162,14 +162,38 @@ void ViewerSession::start(Config cfg) {
         if (sid == 0 || port <= 0) return;
         auto x = std::make_shared<VideoUdpXport>();
         std::string e;
-        if (!x->Init(host.toStdString(), port, sid, &e)) {
+        if (!x->Init(host.toStdString(), port, sid,
+                      VideoUdpXport::Role::Viewer, &e)) {
             std::cerr << "[viewer] UDP xport init failed: " << e << "\n";
             return;
         }
+        x->SetDirectUpCallback([](const std::string& h, int p) {
+            std::cerr << "[viewer] UDP direct path up — peer " << h
+                      << ":" << p << " (bypassing relay)\n";
+        });
         x->StartReceiver(processVideoBytes);
         udpXport = x;
+        // Two spots so operators can find it: the small viewer status bar,
+        // AND the app-wide log panel (via stderr -> LogSink) so the main
+        // window shows it even when the viewer popup is minimised.
         emit status(QStringLiteral("UDP video plane up (relay %1:%2)")
                         .arg(host).arg(port));
+        std::cerr << "[viewer] UDP video plane up (session_id=" << sid
+                  << " relay=" << host.toStdString() << ":" << port << ")\n";
+    };
+    cb.onUdpCandidates = [&udpXport, this](const std::uint8_t* d, std::size_t s) {
+        if (!udpXport) return;
+        auto doc = QJsonDocument::fromJson(QByteArray::fromRawData(
+            reinterpret_cast<const char*>(d), static_cast<int>(s)));
+        if (!doc.isObject()) return;
+        const auto obj = doc.object();
+        const QString host = obj.value("peer_host").toString();
+        const int port = obj.value("peer_port").toInt();
+        if (host.isEmpty() || port <= 0) return;
+        udpXport->StartDirectProbe(host.toStdString(), port);
+        std::cerr << "[viewer] NAT-T probing peer " << host.toStdString()
+                  << ":" << port << "\n";
+        emit status(QStringLiteral("NAT-T probing %1:%2 ...").arg(host).arg(port));
     };
 
     // Reconnect loop with exponential backoff: 1, 2, 4, 8, 16, 30, 30...

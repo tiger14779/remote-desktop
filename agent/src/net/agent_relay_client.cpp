@@ -69,6 +69,9 @@ void RelayClient::Run(const Callbacks& cb) {
             case proto::MsgUdpInfo:
                 if (cb.onUdpInfo) cb.onUdpInfo(body.data(), body.size());
                 break;
+            case proto::MsgUdpCandidates:
+                if (cb.onUdpCandidates) cb.onUdpCandidates(body.data(), body.size());
+                break;
             case proto::MsgHeartbeat:
                 // Relay reflects ours; nothing to do.
                 break;

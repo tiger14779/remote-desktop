@@ -460,10 +460,15 @@ void AgentRunner::runLoop(Config cfg) {
             if (sid == 0 || port <= 0) return;
             auto x = std::make_unique<VideoUdpXport>();
             std::string e;
-            if (!x->Init(host.toStdString(), port, sid, &e)) {
+            if (!x->Init(host.toStdString(), port, sid,
+                          VideoUdpXport::Role::Agent, &e)) {
                 std::cerr << "[agent] UDP xport init failed: " << e << "\n";
                 return;
             }
+            x->SetDirectUpCallback([](const std::string& h, int p) {
+                std::cerr << "[agent] UDP direct path up — peer " << h
+                          << ":" << p << " (bypassing relay)\n";
+            });
             // Agent SENDS video — we don't need an inbound callback (the
             // viewer is the only other peer and it doesn't push frames at
             // us). But we still start the recv loop so the periodic
@@ -473,6 +478,19 @@ void AgentRunner::runLoop(Config cfg) {
             udpXport = std::move(x);
             std::cerr << "[agent] UDP video plane up — session_id=" << sid
                       << " relay=" << host.toStdString() << ":" << port << "\n";
+        };
+        cb.onUdpCandidates = [&udpXport](const std::uint8_t* d, std::size_t s) {
+            if (!udpXport) return;  // UDP_INFO must have arrived first
+            auto doc = QJsonDocument::fromJson(QByteArray::fromRawData(
+                reinterpret_cast<const char*>(d), static_cast<int>(s)));
+            if (!doc.isObject()) return;
+            const auto obj = doc.object();
+            const QString host = obj.value("peer_host").toString();
+            const int port = obj.value("peer_port").toInt();
+            if (host.isEmpty() || port <= 0) return;
+            udpXport->StartDirectProbe(host.toStdString(), port);
+            std::cerr << "[agent] NAT-T probing peer " << host.toStdString()
+                      << ":" << port << "\n";
         };
         client.Run(cb);
         // Tear down the UDP xport (if any) before the pump is stopped so

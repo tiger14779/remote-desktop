@@ -37,6 +37,9 @@ public:
         // the agent should target for its video data plane. Payload is the
         // JSON body, caller parses.
         std::function<void(const std::uint8_t* data, std::size_t size)> onUdpInfo;
+        // UDP_CANDIDATES: relay tells us the peer's public UDP endpoint.
+        // Agent side kicks off NAT-T probing to that endpoint.
+        std::function<void(const std::uint8_t* data, std::size_t size)> onUdpCandidates;
     };
 
     bool ConnectAndRegister(const Config& cfg, std::string* errorOut);

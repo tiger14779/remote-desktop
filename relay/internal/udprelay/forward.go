@@ -28,6 +28,11 @@ import (
 const (
 	pktTypeVideoFrag byte = 0x01
 	pktTypeRegister  byte = 0x02
+	pktTypeProbe     byte = 0x04
+	pktTypeProbeAck  byte = 0x05
+
+	roleAgent  byte = 0
+	roleViewer byte = 1
 
 	registerExpiry = 30 * time.Second
 	headerSize     = 5 // 4-byte session id + 1-byte type
@@ -46,23 +51,46 @@ type Server struct {
 }
 
 type pair struct {
-	endpoints map[string]*net.UDPAddr // key = "ip:port" stringified
-	lastSeen  map[string]time.Time
+	// Key = role byte (0=agent, 1=viewer). Two-entry map, one per peer.
+	endpoints map[byte]*net.UDPAddr
+	lastSeen  map[byte]time.Time
+	// Fires exactly once when both roles have registered — server layer
+	// blocks on this to send TCP UDP_CANDIDATES.
+	bothReady chan struct{}
+	fired     bool
 }
 
 func New() *Server { return &Server{sessions: map[uint32]*pair{}} }
 
 // Allocate reserves a session_id for an upcoming UDP channel. Called from the
-// TCP signaling layer once it has matched a viewer to an agent.
-func (s *Server) Allocate(id uint32) {
+// TCP signaling layer once it has matched a viewer to an agent. Returns a
+// channel that is closed the first time both role endpoints have registered
+// (so the signaling layer can send TCP UDP_CANDIDATES immediately).
+func (s *Server) Allocate(id uint32) <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, exists := s.sessions[id]; !exists {
-		s.sessions[id] = &pair{
-			endpoints: map[string]*net.UDPAddr{},
-			lastSeen:  map[string]time.Time{},
-		}
+	if p, exists := s.sessions[id]; exists {
+		return p.bothReady
 	}
+	p := &pair{
+		endpoints: map[byte]*net.UDPAddr{},
+		lastSeen:  map[byte]time.Time{},
+		bothReady: make(chan struct{}),
+	}
+	s.sessions[id] = p
+	return p.bothReady
+}
+
+// EndpointsOf returns a snapshot of both peers' UDP addresses for the given
+// session. Values may be nil if a role hasn't registered yet.
+func (s *Server) EndpointsOf(id uint32) (agent, viewer *net.UDPAddr) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p := s.sessions[id]
+	if p == nil {
+		return nil, nil
+	}
+	return p.endpoints[roleAgent], p.endpoints[roleViewer]
 }
 
 // Release drops a session's state. Called from TCP signaling on session end.
@@ -124,34 +152,65 @@ func (s *Server) handle(id uint32, typ byte, src *net.UDPAddr, pkt []byte) {
 		return
 	}
 
-	key := src.String()
+	// findRoleOf: which role does the packet's source address belong to?
+	// Returns 255 if none registered from this src yet.
+	findRoleOf := func(src *net.UDPAddr) byte {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		for r, ep := range p.endpoints {
+			if ep != nil && ep.IP.Equal(src.IP) && ep.Port == src.Port {
+				return r
+			}
+		}
+		return 255
+	}
 
 	switch typ {
 	case pktTypeRegister:
-		// Just refresh the endpoint mapping. No payload to forward.
+		// Payload after the 5-byte header is [1B role]. Anything else is
+		// legacy / malformed — treat missing role as agent so we don't
+		// break older peers, though nothing should be sending that anymore.
+		var role byte = roleAgent
+		if len(pkt) >= 6 {
+			role = pkt[5]
+		}
+		if role != roleAgent && role != roleViewer {
+			return
+		}
 		s.mu.Lock()
-		p.endpoints[key] = src
-		p.lastSeen[key] = time.Now()
-		s.mu.Unlock()
-		return
-
-	case pktTypeVideoFrag:
-		// Update lastSeen (the sender is alive) and forward to every OTHER
-		// endpoint registered against this session. The peer-count is
-		// typically 2 — one agent, one viewer — so "every other endpoint"
-		// is at most one destination. Loops over a map of size <= 2.
-		s.mu.Lock()
-		p.endpoints[key] = src
-		p.lastSeen[key] = time.Now()
-		targets := make([]*net.UDPAddr, 0, len(p.endpoints))
-		for k, ep := range p.endpoints {
-			if k != key {
-				targets = append(targets, ep)
-			}
+		p.endpoints[role] = src
+		p.lastSeen[role] = time.Now()
+		bothPresent := p.endpoints[roleAgent] != nil && p.endpoints[roleViewer] != nil
+		fireReady := bothPresent && !p.fired
+		if fireReady {
+			p.fired = true
 		}
 		s.mu.Unlock()
-		for _, t := range targets {
-			_, _ = s.conn.WriteToUDP(pkt, t)
+		if fireReady {
+			close(p.bothReady)
+		}
+		return
+
+	case pktTypeVideoFrag, pktTypeProbe, pktTypeProbeAck:
+		// Forward to the OTHER role. Probe/probe_ack are used for direct
+		// NAT-T signalling but they also go through us as a fallback when
+		// the direct path hasn't come up yet.
+		senderRole := findRoleOf(src)
+		if senderRole == 255 {
+			// The sender hasn't registered against this session id — drop
+			// so an outsider can't inject frames into a session by
+			// guessing the id.
+			return
+		}
+		otherRole := senderRole ^ 1
+		s.mu.RLock()
+		dst := p.endpoints[otherRole]
+		s.mu.RUnlock()
+		s.mu.Lock()
+		p.lastSeen[senderRole] = time.Now()
+		s.mu.Unlock()
+		if dst != nil {
+			_, _ = s.conn.WriteToUDP(pkt, dst)
 		}
 		return
 
@@ -172,10 +231,10 @@ func (s *Server) janitor() {
 		now := time.Now()
 		s.mu.Lock()
 		for _, p := range s.sessions {
-			for k, last := range p.lastSeen {
+			for role, last := range p.lastSeen {
 				if now.Sub(last) > registerExpiry {
-					delete(p.endpoints, k)
-					delete(p.lastSeen, k)
+					delete(p.endpoints, role)
+					delete(p.lastSeen, role)
 				}
 			}
 		}

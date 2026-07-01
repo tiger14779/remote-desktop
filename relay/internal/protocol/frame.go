@@ -46,6 +46,12 @@ const (
 	// VIDEO_FRAG packets there; control-plane frames stay on TCP.
 	MsgUdpInfo MessageType = 0x60 // relay -> peer, JSON {session_id, host, port}
 
+	// P2P candidate exchange. Fired once both peers' UDP REGISTER has
+	// arrived — relay tells each peer the OTHER'S observed public UDP
+	// endpoint so they can try to punch a direct hole and skip the relay
+	// hop entirely. JSON: {"peer_host":str, "peer_port":int}.
+	MsgUdpCandidates MessageType = 0x61
+
 	// Responses.
 	MsgRegisterResp MessageType = 0x81 // Relay -> Agent
 	MsgAuthResp     MessageType = 0x82 // Relay -> Viewer
@@ -138,6 +144,10 @@ func (t MessageType) String() string {
 		return "FILE_XFER_CHUNK"
 	case MsgFileXferEnd:
 		return "FILE_XFER_END"
+	case MsgUdpInfo:
+		return "UDP_INFO"
+	case MsgUdpCandidates:
+		return "UDP_CANDIDATES"
 	case MsgRegisterResp:
 		return "REGISTER_RESP"
 	case MsgAuthResp:

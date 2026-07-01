@@ -58,6 +58,13 @@ type udpInfoPayload struct {
 	Port      int    `json:"port"`
 }
 
+// udpCandidatesPayload tells one peer where to find the other for NAT-T
+// probing. Fired only after both peers have registered UDP endpoints.
+type udpCandidatesPayload struct {
+	PeerHost string `json:"peer_host"`
+	PeerPort int    `json:"peer_port"`
+}
+
 func (s *Server) ListenAndServe() error {
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
@@ -223,8 +230,9 @@ func (s *Server) handleViewer(conn *safeconn.Conn, first *protocol.Frame) {
 	// present" check, which over time would only matter on a pathological
 	// 10⁹-session relay.
 	udpSessionID := rand.Uint32()
+	var udpReady <-chan struct{}
 	if s.udpFwd != nil {
-		s.udpFwd.Allocate(udpSessionID)
+		udpReady = s.udpFwd.Allocate(udpSessionID)
 	}
 	defer func() {
 		dev.DetachViewer(conn)
@@ -255,6 +263,34 @@ func (s *Server) handleViewer(conn *safeconn.Conn, first *protocol.Frame) {
 	udpInfo := udpInfoPayload{SessionID: udpSessionID, Host: "", Port: s.udpPort}
 	_ = dev.Conn.WriteJSON(protocol.MsgUdpInfo, udpInfo)
 	_ = conn.WriteJSON(protocol.MsgUdpInfo, udpInfo)
+
+	// Wait for both peers to actually appear on the UDP forwarder, then
+	// forward each side's reflexive endpoint to the other so they can
+	// attempt direct NAT-T. Runs in a goroutine so the main handler can
+	// keep pumping TCP frames while punching is negotiated.
+	if udpReady != nil {
+		agentConn := dev.Conn // capture to avoid dev.Conn escaping the goroutine
+		viewerConn := conn
+		go func() {
+			select {
+			case <-udpReady:
+			case <-time.After(30 * time.Second):
+				// No P2P attempt: never both registered. Session
+				// continues on relayed UDP.
+				return
+			}
+			agentEP, viewerEP := s.udpFwd.EndpointsOf(udpSessionID)
+			if agentEP == nil || viewerEP == nil {
+				return
+			}
+			// Tell each side about the OTHER'S reflexive address.
+			_ = agentConn.WriteJSON(protocol.MsgUdpCandidates,
+				udpCandidatesPayload{PeerHost: viewerEP.IP.String(), PeerPort: viewerEP.Port})
+			_ = viewerConn.WriteJSON(protocol.MsgUdpCandidates,
+				udpCandidatesPayload{PeerHost: agentEP.IP.String(), PeerPort: agentEP.Port})
+			log.Printf("[%s] sent UDP_CANDIDATES: agent=%s viewer=%s", addr, agentEP, viewerEP)
+		}()
+	}
 
 	for {
 		_ = conn.Net().SetReadDeadline(time.Now().Add(idleTimeout))

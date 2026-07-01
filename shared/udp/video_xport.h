@@ -39,6 +39,11 @@
 
 class VideoUdpXport {
 public:
+    enum class Role : std::uint8_t {
+        Agent  = 0,  // pushes video, receives nothing meaningful
+        Viewer = 1,  // pulls video, sends nothing meaningful
+    };
+
     // Invoked from the receive thread when a complete H.264 frame has been
     // reassembled. The bytes are an Annex-B stream — identical content to
     // the old TCP MsgVideoFrame payload, ready to feed straight into the
@@ -46,14 +51,40 @@ public:
     using FrameReadyFn = std::function<void(const std::uint8_t* data,
                                              std::size_t size)>;
 
+    // Fired the first time the direct (P2P) path is confirmed via probe/ack.
+    // After this, video traffic bypasses the relay entirely.
+    using DirectUpFn = std::function<void(const std::string& peerHost,
+                                           int peerPort)>;
+
     VideoUdpXport();
     ~VideoUdpXport();
 
     // Bind a local UDP socket (any port) and store the relay's UDP address
     // we'll talk to. Must be called before SendFrame / StartReceiver.
     bool Init(const std::string& relayHost, int relayPort,
-              std::uint32_t sessionId,
+              std::uint32_t sessionId, Role role,
               std::string* errorOut);
+
+    // Set the fallback destination — the relay UDP endpoint. Used when
+    // direct P2P is not (yet) established. This is what Init sets already;
+    // exposing the setter for future dynamic-relay-selection scenarios.
+    void SetRelay(const std::string& host, int port);
+
+    // Register a peer candidate to probe. Called from TCP MsgUdpCandidates
+    // dispatch. Spawns a background probe: sends kPktProbe packets to this
+    // endpoint every ~200ms until the peer replies with kPktProbeAck (at
+    // which point we mark direct and re-target the data plane there) or
+    // Stop() is called.
+    void StartDirectProbe(const std::string& peerHost, int peerPort);
+
+    // Optional callback fired on the recv thread the moment kPktProbeAck
+    // proves the direct path is up. GUI code can queue-connect to log
+    // "🟢 Direct" instead of "🟡 Relay".
+    void SetDirectUpCallback(DirectUpFn cb) { directCb_ = std::move(cb); }
+
+    // Reports whether the direct (P2P) path is currently in use for
+    // outbound sends. Used by diagnostics.
+    bool IsDirect() const { return directUp_.load(); }
 
     // Spawn the recv loop. Callback fires on the recv thread; the caller is
     // responsible for cross-thread handoff (e.g., a QueuedConnection).
@@ -83,11 +114,27 @@ private:
     };
 
     UdpSocket sock_;
+
+    // Where we send outbound video. Starts pointed at the relay; after
+    // successful NAT-T probing, dstMu_ + directUp_ = true swaps this to
+    // point directly at the peer. Reads are lock-taken; the frame sender
+    // path takes the mutex once per encoded frame (cheap, uncontended).
+    std::mutex dstMu_;
+    UdpSocket::Endpoint dst_;
     UdpSocket::Endpoint relay_;
+
+    // Peer candidate we're currently trying to punch to. Empty means "no
+    // direct probe scheduled". Set by StartDirectProbe.
+    UdpSocket::Endpoint peerCandidate_;
+    std::atomic<bool> directUp_{false};
+    std::chrono::steady_clock::time_point probeUntil_;
+
     std::uint32_t sessionId_ = 0;
+    Role role_ = Role::Agent;
     std::uint32_t nextFrameId_ = 1;
 
     FrameReadyFn frameCb_;
+    DirectUpFn   directCb_;
     std::thread  recvThread_;
     std::atomic<bool> shouldExit_{false};
 

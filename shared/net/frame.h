@@ -43,6 +43,11 @@ enum MessageType : std::uint8_t {
     // Payload: JSON {"session_id":uint32, "host":string, "port":int}. Empty
     // host means "reuse the TCP relay address".
     MsgUdpInfo       = 0x60,
+    // P2P NAT-T candidate exchange: relay -> peer once both peers have
+    // sent UDP REGISTER. Tells this peer the OTHER peer's public UDP
+    // endpoint so it can start punching a direct hole.
+    // Payload: JSON {"peer_host":string, "peer_port":int}.
+    MsgUdpCandidates = 0x61,
 
     MsgRegisterResp  = 0x81,
     MsgAuthResp      = 0x82,
@@ -68,6 +73,7 @@ inline const char* MessageTypeName(std::uint8_t t) {
         case MsgFileXferChunk: return "FILE_XFER_CHUNK";
         case MsgFileXferEnd:   return "FILE_XFER_END";
         case MsgUdpInfo:       return "UDP_INFO";
+        case MsgUdpCandidates: return "UDP_CANDIDATES";
         case MsgRegisterResp: return "REGISTER_RESP";
         case MsgAuthResp:     return "AUTH_RESP";
         case MsgConnectResp:  return "CONNECT_RESP";

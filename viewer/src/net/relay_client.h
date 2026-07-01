@@ -35,6 +35,8 @@ public:
         // Inbound UDP_INFO from relay (after CONNECT succeeds): JSON payload
         // carrying session_id + the relay's UDP port for the video data plane.
         std::function<void(const std::uint8_t* data, std::size_t size)> onUdpInfo;
+        // UDP_CANDIDATES: peer's public UDP endpoint (for NAT-T probing).
+        std::function<void(const std::uint8_t* data, std::size_t size)> onUdpCandidates;
         std::function<void()> onDisconnect;
     };
 
