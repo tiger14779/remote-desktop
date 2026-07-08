@@ -1,7 +1,14 @@
 #include "encode/h264_encoder.h"
 
+// Include d3d11.h in C++ scope FIRST so its GUID operator overloads are
+// visible. When hwcontext_d3d11va.h below re-includes it inside extern "C",
+// the header guard skips it (no double-include, no linkage conflict).
+#include <d3d11.h>
+
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_d3d11va.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
 #include <libswscale/swscale.h>
@@ -116,11 +123,25 @@ struct H264Encoder::Impl {
     SwsContext* sws = nullptr;
     int64_t nextPts = 0;
 
+    // Hardware path (only populated when Init got a d3d11Device AND NVENC
+    // was selected). hwFramesRef owns the encoder-side texture pool that
+    // NVENC reads from; hwFrame is a persistent AVFrame we reuse per
+    // encode call. It doesn't allocate a texture — CopySubresourceRegion
+    // pushes the DXGI capture into the pool texture and we point hwFrame
+    // at it.
+    bool           gpuMode = false;
+    AVBufferRef*   hwDeviceRef = nullptr;
+    AVBufferRef*   hwFramesRef = nullptr;
+    AVFrame*       hwFrame     = nullptr;
+
     ~Impl() {
         if (sws) sws_freeContext(sws);
         if (frame) av_frame_free(&frame);
+        if (hwFrame) av_frame_free(&hwFrame);
         if (pkt) av_packet_free(&pkt);
         if (ctx) avcodec_free_context(&ctx);
+        if (hwFramesRef) av_buffer_unref(&hwFramesRef);
+        if (hwDeviceRef) av_buffer_unref(&hwDeviceRef);
     }
 };
 
@@ -160,11 +181,74 @@ bool H264Encoder::Init(const Config& cfg, std::string* chosenEncoder, std::strin
         ctx->height = cfg.height;
         ctx->time_base = {1, cfg.fps};
         ctx->framerate = {cfg.fps, 1};
-        ctx->pix_fmt = AV_PIX_FMT_YUV420P; // every h264 encoder accepts this
         ctx->bit_rate = int64_t(cfg.bitrateKbps) * 1000;
         ctx->gop_size = cfg.gopSize;
         ctx->max_b_frames = 0; // low latency
         ctx->thread_count = 0; // auto
+
+        // GPU-direct path (currently only nvenc — h264_amf/qsv also support
+        // D3D11 input but need different device flavour). If we're on nvenc
+        // AND the caller passed a D3D11 device, wire hw_device_ctx +
+        // hw_frames_ctx so NVENC reads BGRA straight from a shared texture.
+        // Otherwise: legacy YUV420P CPU path.
+        bool wantGpu = (cfg.d3d11Device != nullptr) &&
+                        (std::string(name) == "h264_nvenc");
+        AVBufferRef* localHwDev = nullptr;
+        AVBufferRef* localHwFr  = nullptr;
+        if (wantGpu) {
+            // Build an hw_device_ctx around the CALLER'S D3D11 device (not
+            // create our own — sharing avoids a cross-device texture copy).
+            localHwDev = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
+            if (!localHwDev) { wantGpu = false; }
+            if (wantGpu) {
+                auto* devCtx = reinterpret_cast<AVHWDeviceContext*>(localHwDev->data);
+                auto* d3dCtx = reinterpret_cast<AVD3D11VADeviceContext*>(devCtx->hwctx);
+                d3dCtx->device = static_cast<ID3D11Device*>(cfg.d3d11Device);
+                // ffmpeg holds a ref; we AddRef so our caller's device
+                // stays alive irrespective of our lifetime.
+                d3dCtx->device->AddRef();
+                int e = av_hwdevice_ctx_init(localHwDev);
+                if (e < 0) {
+                    std::cerr << "[encoder] hw_device_ctx_init: "
+                              << avErr("d3d11", e) << " — falling back to CPU path\n";
+                    av_buffer_unref(&localHwDev);
+                    wantGpu = false;
+                }
+            }
+            if (wantGpu) {
+                localHwFr = av_hwframe_ctx_alloc(localHwDev);
+                if (!localHwFr) { av_buffer_unref(&localHwDev); wantGpu = false; }
+            }
+            if (wantGpu) {
+                auto* frCtx = reinterpret_cast<AVHWFramesContext*>(localHwFr->data);
+                frCtx->format    = AV_PIX_FMT_D3D11;
+                frCtx->sw_format = AV_PIX_FMT_BGRA;
+                frCtx->width     = cfg.width;
+                frCtx->height    = cfg.height;
+                // 8 buffers gives NVENC internal pipeline enough headroom
+                // to overlap encoding of frame N+1 while frame N is still
+                // being read from its texture. Below ~4 we start seeing
+                // stalls / EAGAIN loops; 8 is what upstream nvenc example
+                // uses.
+                frCtx->initial_pool_size = 8;
+                int e = av_hwframe_ctx_init(localHwFr);
+                if (e < 0) {
+                    std::cerr << "[encoder] hw_frames_ctx_init: "
+                              << avErr("d3d11", e) << " — falling back to CPU path\n";
+                    av_buffer_unref(&localHwFr);
+                    av_buffer_unref(&localHwDev);
+                    wantGpu = false;
+                }
+            }
+        }
+
+        if (wantGpu) {
+            ctx->pix_fmt = AV_PIX_FMT_D3D11;
+            ctx->hw_device_ctx = av_buffer_ref(localHwDev);
+            ctx->hw_frames_ctx = av_buffer_ref(localHwFr);
+        } else {
+            ctx->pix_fmt = AV_PIX_FMT_YUV420P; // every h264 encoder accepts this
+        }
 
         applyLowLatencyTuning(ctx, name);
 
@@ -174,18 +258,36 @@ bool H264Encoder::Init(const Config& cfg, std::string* chosenEncoder, std::strin
                       << avErr("open", err) << "\n";
             lastErr = avErr(std::string(name) + ": open", err);
             avcodec_free_context(&ctx);
+            if (localHwFr) av_buffer_unref(&localHwFr);
+            if (localHwDev) av_buffer_unref(&localHwDev);
             continue;
         }
-        std::cerr << "[encoder] " << name << ": OK — using this one\n";
+        std::cerr << "[encoder] " << name << ": OK — using this one"
+                  << (wantGpu ? " (GPU-direct D3D11 input)" : "") << "\n";
 
         impl_->codec = codec;
         impl_->ctx = ctx;
+        impl_->gpuMode = wantGpu;
+        impl_->hwDeviceRef = localHwDev;  // ownership moves to Impl
+        impl_->hwFramesRef = localHwFr;
         if (chosenEncoder) *chosenEncoder = name;
         break;
     }
     if (!impl_->ctx) {
         if (errorOut) *errorOut = "no usable H.264 encoder. last error: " + lastErr;
         return false;
+    }
+
+    impl_->pkt = av_packet_alloc();
+    if (!impl_->pkt) {
+        if (errorOut) *errorOut = "av_packet_alloc failed";
+        return false;
+    }
+
+    if (impl_->gpuMode) {
+        // GPU path: no persistent CPU frame or sws context. Each call to
+        // EncodeFrameGpu allocates a fresh AVFrame from the encoder pool.
+        return true;
     }
 
     impl_->frame = av_frame_alloc();
@@ -199,12 +301,6 @@ bool H264Encoder::Init(const Config& cfg, std::string* chosenEncoder, std::strin
     int err = av_frame_get_buffer(impl_->frame, 0);
     if (err < 0) {
         if (errorOut) *errorOut = avErr("av_frame_get_buffer", err);
-        return false;
-    }
-
-    impl_->pkt = av_packet_alloc();
-    if (!impl_->pkt) {
-        if (errorOut) *errorOut = "av_packet_alloc failed";
         return false;
     }
 
@@ -233,6 +329,10 @@ bool H264Encoder::EncodeFrame(const uint8_t* bgra, int rowPitch, int64_t pts,
                               std::string* errorOut) {
     if (!impl_->ctx) {
         if (errorOut) *errorOut = "encoder not initialised";
+        return false;
+    }
+    if (impl_->gpuMode) {
+        if (errorOut) *errorOut = "encoder is GPU-mode; use EncodeFrameGpu";
         return false;
     }
 
@@ -267,6 +367,79 @@ bool H264Encoder::EncodeFrame(const uint8_t* bgra, int rowPitch, int64_t pts,
         if (err == AVERROR(EAGAIN) || err == AVERROR_EOF) break;
         if (err < 0) {
             if (errorOut) *errorOut = avErr("avcodec_receive_packet", err);
+            return false;
+        }
+        outPackets->emplace_back(impl_->pkt->data, impl_->pkt->data + impl_->pkt->size);
+        av_packet_unref(impl_->pkt);
+    }
+    return true;
+}
+
+bool H264Encoder::IsGpuInput() const { return impl_->gpuMode; }
+
+bool H264Encoder::EncodeFrameGpu(ID3D11Texture2D* srcTexture, int64_t pts,
+                                  bool forceKeyframe,
+                                  std::vector<std::vector<uint8_t>>* outPackets,
+                                  std::string* errorOut) {
+    if (!impl_->ctx || !impl_->gpuMode) {
+        if (errorOut) *errorOut = "encoder not in GPU-direct mode";
+        return false;
+    }
+    if (!srcTexture) {
+        if (errorOut) *errorOut = "null D3D11 texture";
+        return false;
+    }
+
+    // Get a fresh AVFrame with an encoder-pool-owned D3D11 texture. Sharing
+    // one texture across sends is unsafe with NVENC's asynchronous queue —
+    // the previous frame may still be reading from it when we overwrite
+    // for the next. The pool (initial_pool_size = 8) rotates so writes and
+    // reads never collide.
+    AVFrame* f = av_frame_alloc();
+    if (!f) {
+        if (errorOut) *errorOut = "av_frame_alloc failed";
+        return false;
+    }
+    int err = av_hwframe_get_buffer(impl_->hwFramesRef, f, 0);
+    if (err < 0) {
+        av_frame_free(&f);
+        if (errorOut) *errorOut = avErr("av_hwframe_get_buffer", err);
+        return false;
+    }
+
+    // GPU-to-GPU copy from the caller's DXGI-captured texture into the
+    // encoder's pool texture. Uses the D3D11 device context ffmpeg attached
+    // to our shared device — same-device copies are the fast path.
+    auto* devCtx = reinterpret_cast<AVHWDeviceContext*>(impl_->hwDeviceRef->data);
+    auto* d3dCtx = reinterpret_cast<AVD3D11VADeviceContext*>(devCtx->hwctx);
+    ID3D11Texture2D* dstTex =
+        reinterpret_cast<ID3D11Texture2D*>(f->data[0]);
+    UINT dstSub = static_cast<UINT>(reinterpret_cast<uintptr_t>(f->data[1]));
+    // AVD3D11VADeviceContext ships lock/unlock callbacks; using them keeps
+    // us safe against other users of the same device (there aren't any
+    // right now, but cheap insurance).
+    if (d3dCtx->lock) d3dCtx->lock(d3dCtx->lock_ctx);
+    d3dCtx->device_context->CopySubresourceRegion(
+        dstTex, dstSub, 0, 0, 0, srcTexture, 0, nullptr);
+    if (d3dCtx->unlock) d3dCtx->unlock(d3dCtx->lock_ctx);
+
+    f->pts = pts;
+    f->pict_type = forceKeyframe ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
+
+    err = avcodec_send_frame(impl_->ctx, f);
+    // Release our reference; the encoder holds its own until it's done
+    // with the texture.
+    av_frame_free(&f);
+    if (err < 0) {
+        if (errorOut) *errorOut = avErr("avcodec_send_frame(gpu)", err);
+        return false;
+    }
+
+    while (true) {
+        err = avcodec_receive_packet(impl_->ctx, impl_->pkt);
+        if (err == AVERROR(EAGAIN) || err == AVERROR_EOF) break;
+        if (err < 0) {
+            if (errorOut) *errorOut = avErr("avcodec_receive_packet(gpu)", err);
             return false;
         }
         outPackets->emplace_back(impl_->pkt->data, impl_->pkt->data + impl_->pkt->size);

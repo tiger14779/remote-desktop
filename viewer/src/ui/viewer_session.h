@@ -100,6 +100,15 @@ private:
     // Diagnostic: how many frames the paint backpressure absorbed (replaced
     // by a fresher one in the stash) since the last log.
     std::atomic<int> droppedFrames_{0};
+
+public:
+    // Paint timing sinks, populated by VideoWidget on the GUI thread every
+    // paintEvent. Read + reset in the per-2s stats print. Public because
+    // VideoWidget is a plain widget lambda-forwarding paint events at us;
+    // no need for a whole friend declaration.
+    std::atomic<int>       paintMaxMs_{0};
+    std::atomic<long long> paintSumMs_{0};
+    std::atomic<int>       paintCount_{0};
 };
 
 Q_DECLARE_METATYPE(ViewerSession::Config)

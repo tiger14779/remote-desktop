@@ -114,3 +114,7 @@ cmake --build build --config Release
 
 
 git clone https://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@github.com/tiger14779/remote-desktop.git /opt/remote-desktop-src && sudo bash /opt/remote-desktop-src/relay/deploy/install.sh
+
+
+
+1.我认为 远程软件 无非就是 2步骤  1.抓屏   2.键鼠控制 , 那么他的检测也无非这两个部分 , 是否可以这样做呢  1.先屏蔽掉 键鼠操作 , 只用抓屏 做测试 ,如果仍然这样 , 是否 可以采用其他 抓图方案 , 比如 从显存中直接获取  , 或者 opencv图像抓取, 或者其他更好的办法wgc这类

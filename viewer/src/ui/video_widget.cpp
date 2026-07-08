@@ -57,6 +57,7 @@ void VideoWidget::paintEvent(QPaintEvent*) {
                   << srcW << "x" << srcH << " -> dst "
                   << dstW << "x" << dstH << ")\n";
     }
+    emit paintTook(static_cast<int>(ms));
     emit framePainted();
 }
 

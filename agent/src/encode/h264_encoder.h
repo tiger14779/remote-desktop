@@ -15,6 +15,10 @@
 #include <string>
 #include <vector>
 
+// Forward declaration so consumers don't have to include d3d11.h.
+struct ID3D11Device;
+struct ID3D11Texture2D;
+
 class H264Encoder {
 public:
     struct Config {
@@ -32,6 +36,17 @@ public:
         int fps = 30;
         int bitrateKbps = 4000;
         int gopSize = 60; // keyframe every N frames (~2s @ 30fps)
+
+        // Optional D3D11 device for zero-copy input path (NVENC only). When
+        // non-null AND the chosen encoder is h264_nvenc, Init wires up an
+        // hw_device_ctx around this device and EncodeFrameGpu becomes
+        // usable — the encoder reads BGRA directly from D3D11 textures the
+        // caller supplies, skipping the DXGI staging + CPU readback +
+        // sws_scale + host-to-device copy dance.
+        //
+        // Must be the SAME device the source textures were allocated on;
+        // DxgiCapturer::D3D11Device() is the intended source.
+        ID3D11Device* d3d11Device = nullptr;
     };
 
     H264Encoder();
@@ -52,6 +67,20 @@ public:
                      bool forceKeyframe,
                      std::vector<std::vector<uint8_t>>* outPackets,
                      std::string* errorOut);
+
+    // Zero-copy GPU input variant. Only valid after Init() with a non-null
+    // Config.d3d11Device AND when the chosen encoder was h264_nvenc. Reads
+    // BGRA directly from `srcTexture` (must have been allocated on the same
+    // device passed to Init). Returns false with an error message if the
+    // encoder was set up in CPU mode.
+    bool EncodeFrameGpu(ID3D11Texture2D* srcTexture, int64_t pts,
+                        bool forceKeyframe,
+                        std::vector<std::vector<uint8_t>>* outPackets,
+                        std::string* errorOut);
+
+    // Reports whether this encoder is operating in the GPU-direct path.
+    // Used by the caller to decide which capture routine to invoke.
+    bool IsGpuInput() const;
 
     // Drain any frames the encoder is still buffering.
     bool Flush(std::vector<std::vector<uint8_t>>* outPackets, std::string* errorOut);

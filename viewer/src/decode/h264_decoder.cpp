@@ -75,7 +75,22 @@ bool H264Decoder::Init(std::string* mode, std::string* errorOut) {
         if (errorOut) *errorOut = "avcodec_alloc_context3 failed";
         return false;
     }
-    impl_->ctx->thread_count = 0; // auto, only used on software path
+    // LOW_DELAY: tell the decoder "don't buffer for B-frame reordering".
+    // The encoder is configured with max_b_frames=0 so there's nothing to
+    // reorder, but ffmpeg's H.264 decoder still holds 1-2 frames by
+    // default in case B-frames appear. That's a hidden 8-33ms of latency
+    // per frame period that we can't afford in a remote-desktop pipeline.
+    impl_->ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+    impl_->ctx->flags2 |= AV_CODEC_FLAG2_FAST;
+    // Frame-parallel threading in the software H.264 decoder holds
+    // (thread_count) frames worth of latency. Single-thread keeps
+    // send_packet -> receive_frame as tight as possible. On the D3D11VA
+    // path threads aren't used at all anyway, so this is a no-op there.
+    impl_->ctx->thread_count = 1;
+    impl_->ctx->thread_type = 0;
+    // Signal explicitly: our stream never reorders, decoder shouldn't
+    // wait to see whether a later frame comes with a lower POC.
+    impl_->ctx->has_b_frames = 0;
 
     // Try D3D11VA. If anything goes wrong here we silently keep
     // hwDeviceCtx == nullptr and fall through to software decode.

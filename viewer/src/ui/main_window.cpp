@@ -46,6 +46,13 @@ MainWindow::MainWindow(const ViewerSession::Config& cfg, QWidget* parent)
     // slot is a single atomic store, runs synchronously on the GUI thread.
     connect(video_, &VideoWidget::framePainted,
             session_.data(), &ViewerSession::onFramePainted, Qt::DirectConnection);
+    connect(video_, &VideoWidget::paintTook, session_.data(),
+            [this](int ms) {
+                if (!session_) return;
+                if (ms > session_->paintMaxMs_.load()) session_->paintMaxMs_.store(ms);
+                session_->paintSumMs_.fetch_add(ms);
+                session_->paintCount_.fetch_add(1);
+            }, Qt::DirectConnection);
 
     // Input: VideoWidget emits on GUI thread → forward to ViewerSession's
     // thread-safe send methods directly (no Qt::QueuedConnection — the

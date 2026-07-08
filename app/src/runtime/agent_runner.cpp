@@ -8,6 +8,8 @@
 #include "udp/lan_ips.h"
 #include "udp/video_xport.h"
 
+#include <d3d11.h>
+
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -17,6 +19,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <mutex>
 #include <string>
@@ -108,6 +111,15 @@ private:
         ec.fps = fps_;
         ec.bitrateKbps = bitrateKbps_;
         ec.gopSize = fps_;
+        // Zero-copy path is only sound when source and encoder dimensions
+        // match — NVENC won't scale a D3D11 input texture for us. If we're
+        // asking for a downscale (maxHeight cap kicked in), fall back to
+        // the CPU sws_scale path so the resize actually happens.
+        const bool sizeMatches =
+            ec.width == ec.srcWidth && ec.height == ec.srcHeight;
+        if (sizeMatches) {
+            ec.d3d11Device = cap_->D3D11Device();
+        }
         std::string chosen;
         if (!enc.Init(ec, &chosen, &err)) {
             std::cerr << "[agent] encoder init failed: " << err << "\n";
@@ -115,7 +127,9 @@ private:
         }
         std::cerr << "[agent] session: " << ec.srcWidth << "x" << ec.srcHeight
                   << " -> " << ec.width << "x" << ec.height
-                  << " @ " << ec.fps << "fps (" << chosen << ")\n";
+                  << " @ " << ec.fps << "fps (" << chosen
+                  << (enc.IsGpuInput() ? ", GPU direct" : ", CPU BGRA")
+                  << ")\n";
 
         // Used as the AcquireNextFrame timeout: block up to one frame-period
         // waiting for a new present, then move on so a long idle still gets
@@ -123,10 +137,9 @@ private:
         const int captureTimeoutMs =
             std::max(1, static_cast<int>(std::chrono::milliseconds(1000 / fps_).count()));
         int64_t pts = 0;
-        std::size_t firstBytes = 0;
-        long long firstEnc = 0, firstSend = 0;
-        if (!encodeAndSend(enc, frame, pts++, /*forceIdr=*/false,
-                           &firstBytes, &firstEnc, &firstSend, &err)) return;
+        // First-frame send happens on the first main-loop iteration below —
+        // for GPU mode this must go through EncodeFrameGpu, so we can't
+        // just call the CPU encodeAndSend eagerly here.
         // No idle-triggered IDR. intra-refresh is on, so every gop_size frames
         // the whole picture is already being rolled through I-stripes — the
         // decoder is always self-recovering and never needs a "fresh start"
@@ -159,13 +172,57 @@ private:
         int statRealFrames = 0;
         int statHeartbeatFrames = 0;
 
+        // Frame-rate cap. Before Phase A (CPU encode) the encode cost of
+        // ~12ms was a natural throttle; now encode is 3ms and DXGI on
+        // hi-Hz monitors happily fires 200+ times per second, blowing
+        // through bitrate targets and giving the viewer a queue of
+        // ~150ms of frames it can't paint fast enough. This deadline
+        // paces the loop at the configured fps so the produced stream
+        // actually matches its ctx->framerate metadata (rate control
+        // depends on this) and the viewer never has more than one
+        // frame's worth in flight.
+        const auto frameInterval = std::chrono::microseconds(1000000 / fps_);
+        auto frameDeadline = std::chrono::steady_clock::now();
+
+        // GPU-mode state: cache the last-captured D3D11 texture so heartbeat
+        // re-encodes work without another capture. The pointer stays valid
+        // for the lifetime of DxgiCapturer's internal gpu pool.
+        DxgiCapturer::GpuFrame gpuFrame;
+        ID3D11Texture2D* lastGpuTex = nullptr;
+        const bool gpuMode = enc.IsGpuInput();
+        // Seed the GPU pool with a first capture in GPU mode so the
+        // heartbeat path has something to re-send from the very start.
+        if (gpuMode) {
+            for (int i = 0; i < 20 && sessionActive_ && !lastGpuTex; ++i) {
+                auto r = cap_->CaptureFrameGpu(100, &gpuFrame, &err);
+                if (r == DxgiCapturer::Result::kFrame) {
+                    lastGpuTex = gpuFrame.gpuTexture;
+                }
+            }
+        }
+
         while (sessionActive_) {
+            // Sleep until the next frame slot so we send at most fps_
+            // frames/sec regardless of how fast encode/DXGI actually run.
+            // First iter has frameDeadline == now, so it doesn't sleep.
+            {
+                const auto now = std::chrono::steady_clock::now();
+                if (now < frameDeadline) {
+                    std::this_thread::sleep_until(frameDeadline);
+                }
+                frameDeadline = std::chrono::steady_clock::now() + frameInterval;
+            }
             // Short capture timeout so the heartbeat check still fires
             // promptly when DXGI sits silent for a long time.
-            DxgiCapturer::Frame fresh;
             const int hbMs = static_cast<int>(kHeartbeatInterval.count());
             const int waitMs = std::min(captureTimeoutMs, hbMs);
-            auto r = cap_->CaptureFrame(waitMs, &fresh, &err);
+            DxgiCapturer::Result r;
+            DxgiCapturer::Frame fresh;   // CPU path scratch
+            if (gpuMode) {
+                r = cap_->CaptureFrameGpu(waitMs, &gpuFrame, &err);
+            } else {
+                r = cap_->CaptureFrame(waitMs, &fresh, &err);
+            }
             if (r == DxgiCapturer::Result::kError) {
                 std::cerr << "[agent] capture error: " << err << " — reinit\n";
                 if (!cap_->Init(&err)) std::this_thread::sleep_for(500ms);
@@ -173,7 +230,11 @@ private:
             }
             bool isHeartbeat = false;
             if (r == DxgiCapturer::Result::kFrame) {
-                frame = std::move(fresh);
+                if (gpuMode) {
+                    lastGpuTex = gpuFrame.gpuTexture;
+                } else {
+                    frame = std::move(fresh);
+                }
             } else {
                 // No new DXGI frame. Only re-send if the heartbeat interval
                 // has elapsed (don't flood the encoder with duplicates).
@@ -185,8 +246,19 @@ private:
 
             std::size_t thisBytes = 0;
             long long encMs = 0, sendMs = 0;
-            if (!encodeAndSend(enc, frame, pts++, /*forceIdr=*/false,
-                                &thisBytes, &encMs, &sendMs, &err)) return;
+            bool ok;
+            if (gpuMode) {
+                if (!lastGpuTex) continue;  // nothing to send yet
+                ok = encodeAndSendGpu(enc, lastGpuTex, pts++, /*forceIdr=*/false,
+                                      &thisBytes, &encMs, &sendMs, &err);
+            } else {
+                ok = encodeAndSend(enc, frame, pts++, /*forceIdr=*/false,
+                                    &thisBytes, &encMs, &sendMs, &err);
+            }
+            if (!ok) {
+                std::cerr << "[agent] encode/send failed: " << err << "\n";
+                return;
+            }
             const auto t1 = std::chrono::steady_clock::now();
             lastSentAt = t1;
             if (isHeartbeat) ++statHeartbeatFrames;
@@ -235,6 +307,40 @@ private:
                 statHeartbeatFrames = 0;
             }
         }
+    }
+
+    // GPU-direct variant: encode straight from a D3D11 texture the caller
+    // just captured with DxgiCapturer::CaptureFrameGpu. Same output shape
+    // as encodeAndSend so callers can pick per frame.
+    bool encodeAndSendGpu(H264Encoder& enc, ID3D11Texture2D* tex,
+                          int64_t pts, bool forceIdr,
+                          std::size_t* bytesOut,
+                          long long* encodeMsOut,
+                          long long* sendMsOut,
+                          std::string* err) {
+        std::vector<std::vector<std::uint8_t>> pkts;
+        const auto t0 = std::chrono::steady_clock::now();
+        if (!enc.EncodeFrameGpu(tex, pts, forceIdr, &pkts, err)) return false;
+        const auto tEnc = std::chrono::steady_clock::now();
+        VideoUdpXport* xport = nullptr;
+        {
+            std::lock_guard<std::mutex> g(xportMu_);
+            xport = udp_;
+        }
+        std::size_t total = 0;
+        for (const auto& p : pkts) {
+            bool ok = xport ? xport->SendFrame(p.data(), p.size(), err)
+                            : client_->SendVideoFrame(p.data(), p.size(), err);
+            if (!ok) return false;
+            total += p.size();
+        }
+        const auto tSent = std::chrono::steady_clock::now();
+        if (encodeMsOut) *encodeMsOut =
+            std::chrono::duration_cast<std::chrono::milliseconds>(tEnc - t0).count();
+        if (sendMsOut) *sendMsOut =
+            std::chrono::duration_cast<std::chrono::milliseconds>(tSent - tEnc).count();
+        if (bytesOut) *bytesOut = total;
+        return true;
     }
 
     bool encodeAndSend(H264Encoder& enc, const DxgiCapturer::Frame& f,
@@ -426,7 +532,12 @@ void AgentRunner::runLoop(Config cfg) {
                             .arg(cfg.deviceId));
             pump.OnSessionEnd();
         };
-        cb.onInput = [](std::uint8_t t, const std::uint8_t* d, std::size_t s) {
+        cb.onInput = [this](std::uint8_t t, const std::uint8_t* d, std::size_t s) {
+            // GUI-toggled diagnostic (see setSkipInput). When on, we receive
+            // input frames from the viewer normally but drop them before
+            // SendInput fires — used to prove whether WeChat Work's alert
+            // is triggered by SendInput or by our screen capture path.
+            if (skipInput_.load()) return;
             std::string e;
             input::HandleInputFrame(t, d, s, &e);
         };

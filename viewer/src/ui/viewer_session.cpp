@@ -57,12 +57,17 @@ void ViewerSession::start(Config cfg) {
     auto statStart = std::make_shared<std::chrono::steady_clock::time_point>(
         std::chrono::steady_clock::now());
     auto statFrames = std::make_shared<int>(0);
+    // Per-2s decode timing accumulators. paint_ms comes in through a
+    // separate atomic populated by VideoWidget on the GUI thread.
+    auto statDecodeMsSum = std::make_shared<long long>(0);
+    auto statDecodeMsMax = std::make_shared<long long>(0);
 
     // Single video-bytes processor; called from BOTH the TCP onVideoFrame
     // path (legacy / before UDP_INFO arrives) and the VideoUdpXport recv
     // thread once Phase 1 UDP is up. Bytes content is identical either way
     // — a complete H.264 Annex-B frame ready for the decoder.
-    auto processVideoBytes = [this, statStart, statFrames]
+    auto processVideoBytes = [this, statStart, statFrames,
+                               statDecodeMsSum, statDecodeMsMax]
                               (const std::uint8_t* data, std::size_t size) {
         if (stopping_) return;
         ++(*statFrames);
@@ -71,10 +76,24 @@ void ViewerSession::start(Config cfg) {
             const auto sinceMs = std::chrono::duration_cast<std::chrono::seconds>(
                 now - *statStart).count();
             const int dropped = droppedFrames_.exchange(0);
+            const int paintMaxMs = paintMaxMs_.exchange(0);
+            const long long paintSumMs = paintSumMs_.exchange(0);
+            const int paintCount = paintCount_.exchange(0);
+            const long long avgDec = *statFrames > 0
+                ? *statDecodeMsSum / *statFrames : 0;
+            const long long avgPaint = paintCount > 0
+                ? paintSumMs / paintCount : 0;
             std::cerr << "[viewer] " << *statFrames << " frames recv in "
-                      << sinceMs << "s, " << dropped << " dropped by paint backpressure\n";
+                      << sinceMs << "s, " << dropped << " dropped by paint"
+                      << ", decode avg " << avgDec << "ms max "
+                      << *statDecodeMsMax << "ms"
+                      << ", paint avg " << avgPaint << "ms max "
+                      << paintMaxMs << "ms"
+                      << "\n";
             *statFrames = 0;
             *statStart = now;
+            *statDecodeMsSum = 0;
+            *statDecodeMsMax = 0;
         }
         std::vector<H264Decoder::DecodedFrame> frames;
         std::string err;
@@ -88,10 +107,8 @@ void ViewerSession::start(Config cfg) {
         const auto tDec1 = std::chrono::steady_clock::now();
         const auto decMs =
             std::chrono::duration_cast<std::chrono::milliseconds>(tDec1 - tDec0).count();
-        if (decMs > 20) {
-            std::cerr << "[viewer] slow decode: " << decMs << "ms ("
-                      << size << " bytes -> " << frames.size() << " frames)\n";
-        }
+        *statDecodeMsSum += decMs;
+        if (decMs > *statDecodeMsMax) *statDecodeMsMax = decMs;
         if (frames.empty()) return;
 
         // Drop everything but the latest frame in this batch — older ones

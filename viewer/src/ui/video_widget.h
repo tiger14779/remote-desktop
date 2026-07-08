@@ -38,6 +38,10 @@ signals:
     // Emitted at the end of paintEvent. ViewerSession listens to this so it
     // knows GUI has caught up and another decoded frame is allowed through.
     void framePainted();
+    // Timing side-channel: how long paintEvent took (ms). MainWindow wires
+    // this into ViewerSession's stat accumulator so the per-2s log can
+    // report avg/max paint cost.
+    void paintTook(int ms);
 
 protected:
     void paintEvent(QPaintEvent*) override;

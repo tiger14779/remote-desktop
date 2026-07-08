@@ -9,6 +9,7 @@
 #include "ui/viewer_session.h"
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QClipboard>
 #include <QCloseEvent>
 #include <QDateTime>
@@ -26,7 +27,7 @@
 #include <QVBoxLayout>
 
 // Hardcoded relay endpoint — change here for now, will be configurable later.
-static constexpr const char* kRelayHost = "192.243.119.207";
+static constexpr const char* kRelayHost = "192.168.1.29";
 static constexpr int         kRelayPort = 7100;
 
 // For the MVP we keep the relay's existing auth model (admin / session_token
@@ -79,6 +80,20 @@ AppMainWindow::AppMainWindow(const LocalConfig& localCfg, QWidget* parent)
         statusLabel_ = new QLabel(QStringLiteral("启动中..."));
         statusLabel_->setStyleSheet(QStringLiteral("color: #666;"));
         gl->addWidget(statusLabel_);
+
+        // Diagnostic: only apply to being-controlled side (agent). Prefixed
+        // with "调试" so anyone toggling it accidentally knows it's not a
+        // normal setting. Grey-italic to visually deprioritise.
+        skipInputBox_ = new QCheckBox(
+            QStringLiteral("调试: 只抓屏, 不接受远程键鼠 (用来定位企业微信告警来源)"));
+        skipInputBox_->setStyleSheet(QStringLiteral("color: #888; font-style: italic;"));
+        connect(skipInputBox_, &QCheckBox::toggled, this, [this](bool on) {
+            agent_.setSkipInput(on);
+            appendLog(on
+                ? QStringLiteral("[diag] input injection DISABLED (capture-only mode)")
+                : QStringLiteral("[diag] input injection enabled"));
+        });
+        gl->addWidget(skipInputBox_);
 
         root->addWidget(g);
     }
@@ -204,11 +219,15 @@ AppMainWindow::AppMainWindow(const LocalConfig& localCfg, QWidget* parent)
     // For now reuse the master device token. Future: per-device dynamic
     // registration where the relay accepts an arbitrary deviceId+token.
     rcfg.deviceToken = QString::fromLatin1(kDeviceToken);
-    // 60 fps so dragging actually feels smooth (30 fps drag is fundamentally
-    // stuttery, regardless of latency). Bitrate scaled up to give the
-    // encoder enough budget per frame at the new cadence.
-    rcfg.fps = 60;
-    rcfg.bitrateKbps = 12000;
+    // 30 fps target + 4 Mbps for the productivity workflow. Once the
+    // decoder's low-delay path is on (see H264Decoder::Init), the biggest
+    // remaining piece of latency is the frame-period wait (33ms at 30fps)
+    // and that is small enough for typing / clicking / occasional window
+    // drag. The old 120fps setting was fighting hidden decoder buffering,
+    // which is gone now — extra fps just eats bandwidth without perceptible
+    // improvement in productivity workloads. Bitrate scaled down to match.
+    rcfg.fps = 30;
+    rcfg.bitrateKbps = 4000;
     rcfg.maxHeight = 1440;
     connect(&agent_, &AgentRunner::status, this,
             &AppMainWindow::onAgentStatus, Qt::QueuedConnection);

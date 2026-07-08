@@ -110,6 +110,14 @@ struct DxgiCapturer::Impl {
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<IDXGIOutputDuplication> duplication;
     ComPtr<ID3D11Texture2D> staging;
+    // GPU-direct path pool: the encoder's hw_frames_ctx wants a
+    // driver-friendly texture (DEFAULT usage, no CPU access, no map). We
+    // copy the DXGI-acquired frame into this pool texture with
+    // CopySubresourceRegion and hand it to the encoder. Reused across
+    // frames so we're not allocating textures per capture.
+    ComPtr<ID3D11Texture2D> gpuPool;
+    int gpuPoolW = 0;
+    int gpuPoolH = 0;
     DXGI_OUTPUT_DESC outputDesc{};
     bool frameHeld = false; // true between AcquireNextFrame and ReleaseFrame
 
@@ -342,4 +350,132 @@ bool DxgiCapturer::TakeCursorShape(CursorShape* out) {
     *out = impl_->pendingCursor;
     impl_->hasPendingCursor = false;
     return true;
+}
+
+ID3D11Device* DxgiCapturer::D3D11Device() const {
+    return impl_->device.Get();
+}
+
+ID3D11DeviceContext* DxgiCapturer::D3D11Context() const {
+    return impl_->context.Get();
+}
+
+bool DxgiCapturer::ensureGpuPool(int width, int height, std::string* errorOut) {
+    if (impl_->gpuPool && impl_->gpuPoolW == width && impl_->gpuPoolH == height) {
+        return true;
+    }
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = static_cast<UINT>(width);
+    desc.Height = static_cast<UINT>(height);
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    // DXGI Desktop Duplication yields BGRA; NVENC via ffmpeg reads either
+    // BGRA (AV_PIX_FMT_BGRA) or NV12 directly. Keep BGRA — NVENC does the
+    // internal color conversion for free on the GPU.
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    // BIND_SHADER_RESOURCE is what ffmpeg's NVENC binding needs so it can
+    // sample from the texture. RENDER_TARGET makes future in-shader
+    // resize / cursor overlay paths possible without recreating.
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    desc.MiscFlags = 0;
+
+    impl_->gpuPool.Reset();
+    HRESULT hr = impl_->device->CreateTexture2D(
+        &desc, nullptr, impl_->gpuPool.GetAddressOf());
+    if (FAILED(hr)) {
+        if (errorOut) *errorOut = hresultMsg("CreateTexture2D(gpuPool)", hr);
+        return false;
+    }
+    impl_->gpuPoolW = width;
+    impl_->gpuPoolH = height;
+    return true;
+}
+
+DxgiCapturer::Result DxgiCapturer::CaptureFrameGpu(int timeoutMs, GpuFrame* out,
+                                                    std::string* errorOut) {
+    if (!impl_->duplication) {
+        if (!impl_->device) {
+            if (errorOut) *errorOut = "capturer not initialised";
+            return Result::kError;
+        }
+        if (!createDuplication(errorOut)) return Result::kError;
+    }
+
+    if (impl_->frameHeld) {
+        impl_->duplication->ReleaseFrame();
+        impl_->frameHeld = false;
+    }
+
+    DXGI_OUTDUPL_FRAME_INFO info{};
+    ComPtr<IDXGIResource> res;
+    HRESULT hr = impl_->duplication->AcquireNextFrame(
+        static_cast<UINT>(timeoutMs), &info, res.GetAddressOf());
+    if (hr == DXGI_ERROR_WAIT_TIMEOUT) return Result::kTimeout;
+    if (hr == DXGI_ERROR_ACCESS_LOST) {
+        impl_->duplication.Reset();
+        if (errorOut) *errorOut = "DXGI access lost; reinit required";
+        return Result::kError;
+    }
+    if (FAILED(hr)) {
+        if (errorOut) *errorOut = hresultMsg("AcquireNextFrame", hr);
+        return Result::kError;
+    }
+    impl_->frameHeld = true;
+
+    // Cursor shape query, same as the CPU path.
+    if (info.PointerShapeBufferSize > 0) {
+        if (impl_->shapeBuf.size() < info.PointerShapeBufferSize) {
+            impl_->shapeBuf.resize(info.PointerShapeBufferSize);
+        }
+        DXGI_OUTDUPL_POINTER_SHAPE_INFO shapeInfo{};
+        UINT used = 0;
+        HRESULT hr2 = impl_->duplication->GetFramePointerShape(
+            info.PointerShapeBufferSize,
+            impl_->shapeBuf.data(),
+            &used,
+            &shapeInfo);
+        if (SUCCEEDED(hr2) && used > 0) {
+            decodeCursorShape(shapeInfo, impl_->shapeBuf.data(), used,
+                              &impl_->pendingCursor);
+            if (!impl_->pendingCursor.bgra.empty()) {
+                impl_->hasPendingCursor = true;
+            }
+        }
+    }
+
+    ComPtr<ID3D11Texture2D> captured;
+    hr = res.As(&captured);
+    if (FAILED(hr)) {
+        impl_->duplication->ReleaseFrame();
+        impl_->frameHeld = false;
+        if (errorOut) *errorOut = hresultMsg("QI ID3D11Texture2D", hr);
+        return Result::kError;
+    }
+    D3D11_TEXTURE2D_DESC capDesc;
+    captured->GetDesc(&capDesc);
+
+    if (!ensureGpuPool(static_cast<int>(capDesc.Width),
+                       static_cast<int>(capDesc.Height), errorOut)) {
+        impl_->duplication->ReleaseFrame();
+        impl_->frameHeld = false;
+        return Result::kError;
+    }
+
+    // GPU-to-GPU copy from DXGI-owned texture into our pool. Fast (~sub-
+    // ms at 1440p) and keeps the DXGI resource untouched so ReleaseFrame
+    // can succeed on the next Acquire.
+    impl_->context->CopyResource(impl_->gpuPool.Get(), captured.Get());
+
+    out->width = static_cast<int>(capDesc.Width);
+    out->height = static_cast<int>(capDesc.Height);
+    out->gpuTexture = impl_->gpuPool.Get();
+    out->timestamp = std::chrono::system_clock::now();
+
+    // DXGI wants the frame released BEFORE the next Acquire. We've already
+    // copied into our pool, so we can let go immediately.
+    impl_->duplication->ReleaseFrame();
+    impl_->frameHeld = false;
+    return Result::kFrame;
 }

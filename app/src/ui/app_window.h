@@ -6,6 +6,7 @@
 #include <QMainWindow>
 #include <QPointer>
 
+class QCheckBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -48,6 +49,7 @@ private:
 
     QLineEdit*   localIdField_ = nullptr;
     QLabel*      statusLabel_ = nullptr;
+    QCheckBox*   skipInputBox_ = nullptr;  // diagnostic: capture-only
 
     QLineEdit*   remoteIdField_ = nullptr;
     QPushButton* connectButton_ = nullptr;
