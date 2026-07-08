@@ -56,6 +56,7 @@ void RelayClient::Run(const Callbacks& cb) {
             case proto::MsgMouseMove:
             case proto::MsgMouseButton:
             case proto::MsgKeyEvent:
+            case proto::MsgMouseWheel:
                 if (cb.onInput) cb.onInput(type, body.data(), body.size());
                 break;
             case proto::MsgClipboardText:

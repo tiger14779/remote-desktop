@@ -27,6 +27,9 @@ enum MessageType : std::uint8_t {
     MsgMouseMove     = 0x20,
     MsgMouseButton   = 0x21,
     MsgKeyEvent      = 0x22,
+    // Vertical scroll wheel. Payload: [i16 BE delta] in WHEEL_DELTA units
+    // (one physical notch = 120, positive = scroll away from user / up).
+    MsgMouseWheel    = 0x23,
     MsgHeartbeat     = 0x30,
     MsgClipboardText = 0x40,  // payload: UTF-8 bytes, no terminator
     MsgCursorShape   = 0x50,  // payload: width(2BE)+height(2BE)+hotX(2BE)+hotY(2BE)+BGRA
@@ -73,6 +76,7 @@ inline const char* MessageTypeName(std::uint8_t t) {
         case MsgMouseMove:    return "MOUSE_MOVE";
         case MsgMouseButton:  return "MOUSE_BUTTON";
         case MsgKeyEvent:     return "KEY_EVENT";
+        case MsgMouseWheel:   return "MOUSE_WHEEL";
         case MsgHeartbeat:    return "HEARTBEAT";
         case MsgClipboardText: return "CLIPBOARD_TEXT";
         case MsgCursorShape:  return "CURSOR_SHAPE";

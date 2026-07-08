@@ -7,6 +7,8 @@
 #include <QThread>
 
 class QLabel;
+class QProgressBar;
+class QPushButton;
 class VideoWidget;
 
 class MainWindow : public QMainWindow {
@@ -17,6 +19,12 @@ public:
 
 protected:
     void closeEvent(QCloseEvent* e) override;
+    // Drag-and-drop: drop a file/folder from Explorer into the viewer
+    // window to push it to the peer without going through Ctrl+C.
+    void dragEnterEvent(QDragEnterEvent* e) override;
+    void dragLeaveEvent(QDragLeaveEvent* e) override;
+    void dropEvent(QDropEvent* e) override;
+    void resizeEvent(QResizeEvent* e) override;
 
 private slots:
     void onStatus(const QString& s);
@@ -40,4 +48,26 @@ private:
     QString lastNetText_;
 
     class ClipboardFileXfer* fileXfer_ = nullptr;
+
+    // Send / cancel button lives in the viewer's status bar — the viewer
+    // has no floating banner (the video pane fills the window), so the
+    // status bar is the natural spot for a call-to-action that only
+    // appears while the local clipboard has sendable files or while a
+    // transfer is running.
+    QPushButton*   xferButton_        = nullptr;
+    QLabel*        xferLabel_         = nullptr;
+    QProgressBar*  xferBar_           = nullptr;
+    bool           clipboardHasSendable_   = false;
+    int            clipboardTopLevelCount_ = 0;
+    bool           xferInFlight_           = false;
+
+    void refreshXferButton();
+
+    // Full-window semi-transparent overlay that appears while a file
+    // drag is over the viewer. Provides the "yes, drop here" affordance;
+    // hidden the rest of the time. Parented to `this` so it resizes
+    // implicitly on resizeEvent (we still ->resize() it explicitly
+    // there because the parent geometry change doesn't propagate to
+    // top-level-child widgets without manual reflow).
+    QLabel* dropOverlay_ = nullptr;
 };

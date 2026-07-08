@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 
 namespace input {
@@ -22,5 +23,21 @@ namespace input {
 bool HandleInputFrame(std::uint8_t msgType,
                       const std::uint8_t* data, std::size_t size,
                       std::string* errorOut);
+
+// Optional override. If set, HandleInputFrame will call this FIRST for every
+// frame it receives. Return value semantics:
+//   true  → the router handled the frame; SendInput is skipped.
+//   false → router declined this specific frame; fall back to SendInput.
+//
+// This lets the app-level KMBox hardware backend intercept exactly the events
+// it can translate (mouse move/button, mapped keys) and drop back to
+// SendInput for things it can't. Set nullptr to remove the override.
+//
+// Router is called from the network read thread — implementations must be
+// thread-safe. Set from any thread; the internal store uses a mutex.
+using InputRouter = std::function<bool(std::uint8_t msgType,
+                                        const std::uint8_t* data,
+                                        std::size_t size)>;
+void SetInputRouter(InputRouter router);
 
 } // namespace input

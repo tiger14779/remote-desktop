@@ -38,6 +38,7 @@ public:
     // thread is busy inside Run() and would never service queued slots).
     void sendMouseMove(std::uint16_t x, std::uint16_t y);
     void sendMouseButton(std::uint8_t button, bool down);
+    void sendMouseWheel(std::int16_t delta);
     void sendKey(std::uint16_t vkCode, bool down);
 
     // Pushes the viewer-side clipboard text to the agent. No-op if the

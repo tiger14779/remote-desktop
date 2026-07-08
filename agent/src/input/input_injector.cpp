@@ -3,7 +3,26 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <mutex>
+
 namespace input {
+
+namespace {
+
+// Guarded pointer to the current router (may be null). We keep both a
+// mutex-protected function object AND a fast-path atomic bool so
+// HandleInputFrame doesn't grab a lock on every frame when no router is
+// installed — which is the default path when the operator hasn't enabled
+// KMBox mode.
+std::mutex g_routerMu;
+InputRouter g_router;
+
+} // namespace
+
+void SetInputRouter(InputRouter router) {
+    std::lock_guard<std::mutex> lk(g_routerMu);
+    g_router = std::move(router);
+}
 
 namespace {
 
@@ -12,6 +31,7 @@ namespace {
 constexpr std::uint8_t kMouseMove   = 0x20;
 constexpr std::uint8_t kMouseButton = 0x21;
 constexpr std::uint8_t kKeyEvent    = 0x22;
+constexpr std::uint8_t kMouseWheel  = 0x23;
 
 std::uint16_t readBE16(const std::uint8_t* p) {
     return static_cast<std::uint16_t>((std::uint16_t(p[0]) << 8) | p[1]);
@@ -28,6 +48,19 @@ bool injectMouseMove(std::uint16_t nx, std::uint16_t ny, std::string* err) {
     in.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
     if (SendInput(1, &in, sizeof(in)) != 1) {
         if (err) *err = "SendInput(mouse_move) rejected";
+        return false;
+    }
+    return true;
+}
+
+bool injectMouseWheel(std::int16_t delta, std::string* err) {
+    INPUT in{};
+    in.type = INPUT_MOUSE;
+    in.mi.dwFlags = MOUSEEVENTF_WHEEL;
+    // mouseData carries the delta as a signed int, extended to DWORD.
+    in.mi.mouseData = static_cast<DWORD>(static_cast<std::int32_t>(delta));
+    if (SendInput(1, &in, sizeof(in)) != 1) {
+        if (err) *err = "SendInput(mouse_wheel) rejected";
         return false;
     }
     return true;
@@ -97,6 +130,19 @@ bool injectKey(std::uint16_t vk, bool down, std::string* err) {
 bool HandleInputFrame(std::uint8_t msgType,
                       const std::uint8_t* data, std::size_t size,
                       std::string* errorOut) {
+    // Router override — if the app installed a KMBox backend and it can
+    // handle this frame, we skip SendInput entirely (that's the whole point:
+    // avoiding the LLKHF_INJECTED flag that WeChat Work watches for).
+    {
+        InputRouter local;
+        {
+            std::lock_guard<std::mutex> lk(g_routerMu);
+            local = g_router;
+        }
+        if (local && local(msgType, data, size)) {
+            return true;
+        }
+    }
     switch (msgType) {
         case kMouseMove:
             if (size != 4) {
@@ -116,6 +162,13 @@ bool HandleInputFrame(std::uint8_t msgType,
                 return false;
             }
             return injectKey(readBE16(data), data[2] != 0, errorOut);
+        case kMouseWheel:
+            if (size != 2) {
+                if (errorOut) *errorOut = "MOUSE_WHEEL payload must be 2 bytes";
+                return false;
+            }
+            return injectMouseWheel(static_cast<std::int16_t>(readBE16(data)),
+                                     errorOut);
         default:
             if (errorOut) *errorOut = "unknown input frame type";
             return false;

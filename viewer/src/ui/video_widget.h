@@ -33,6 +33,7 @@ public slots:
 signals:
     void inputMouseMove(std::uint16_t x, std::uint16_t y);
     void inputMouseButton(std::uint8_t button, bool down);
+    void inputMouseWheel(std::int16_t deltaBE);
     void inputKey(std::uint16_t vkCode, bool down);
 
     // Emitted at the end of paintEvent. ViewerSession listens to this so it
@@ -48,6 +49,7 @@ protected:
     void mouseMoveEvent(QMouseEvent* e) override;
     void mousePressEvent(QMouseEvent* e) override;
     void mouseReleaseEvent(QMouseEvent* e) override;
+    void wheelEvent(QWheelEvent* e) override;
     void keyPressEvent(QKeyEvent* e) override;
     void keyReleaseEvent(QKeyEvent* e) override;
 

@@ -525,19 +525,16 @@ void AgentRunner::runLoop(Config cfg) {
         RelayClient::Callbacks cb;
         cb.onSessionStart = [&]() {
             emit status(QStringLiteral("session active — being controlled"));
+            emit sessionStarted();
             pump.OnSessionStart();
         };
         cb.onSessionEnd = [&]() {
             emit status(QStringLiteral("online — others can connect to %1")
                             .arg(cfg.deviceId));
+            emit sessionEnded();
             pump.OnSessionEnd();
         };
-        cb.onInput = [this](std::uint8_t t, const std::uint8_t* d, std::size_t s) {
-            // GUI-toggled diagnostic (see setSkipInput). When on, we receive
-            // input frames from the viewer normally but drop them before
-            // SendInput fires — used to prove whether WeChat Work's alert
-            // is triggered by SendInput or by our screen capture path.
-            if (skipInput_.load()) return;
+        cb.onInput = [](std::uint8_t t, const std::uint8_t* d, std::size_t s) {
             std::string e;
             input::HandleInputFrame(t, d, s, &e);
         };

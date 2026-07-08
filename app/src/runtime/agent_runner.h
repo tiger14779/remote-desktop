@@ -46,14 +46,6 @@ public:
     // family). No-op if no viewer attached. Safe to call from GUI thread.
     void sendFrameRaw(std::uint8_t type, const QByteArray& payload);
 
-    // Diagnostic switch: when true, incoming input events from the viewer
-    // are received and logged but NOT actually injected into Windows via
-    // SendInput. Purpose: prove whether WeChat Work's "remote control"
-    // alert is triggered by SendInput or by our screen-capture path.
-    // Safe to toggle from the GUI thread; read from the socket thread.
-    void setSkipInput(bool skip) { skipInput_.store(skip); }
-    bool skipInput() const { return skipInput_.load(); }
-
 signals:
     void status(const QString& text);
     // Fired on the GUI thread when the viewer pushes its clipboard contents
@@ -62,6 +54,11 @@ signals:
     // FILE_XFER_BEGIN/CHUNK/END from the viewer. Payload is the raw frame
     // body — the bridge parses it.
     void fileXferFrameReceived(std::uint8_t type, const QByteArray& payload);
+    // Emitted the moment the relay tells us a viewer has attached / detached.
+    // The UI raises a floating "正在被远程" banner + tray toast on start and
+    // clears them on end so the operator always knows their screen is live.
+    void sessionStarted();
+    void sessionEnded();
 
 private:
     void runLoop(Config cfg);  // worker-thread body
@@ -82,7 +79,4 @@ private:
     // waiting to close.
     std::mutex wakeMu_;
     std::condition_variable wakeCv_;
-
-    // See setSkipInput(): diagnostic flag flipped from the GUI.
-    std::atomic<bool> skipInput_{false};
 };

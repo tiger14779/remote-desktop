@@ -115,6 +115,24 @@ void VideoWidget::mouseReleaseEvent(QMouseEvent* e) {
     emit inputMouseButton(btn, false);
 }
 
+void VideoWidget::wheelEvent(QWheelEvent* e) {
+    // Qt reports scroll amount in eighths of a degree. Windows convention
+    // is WHEEL_DELTA = 120 units per notch, which equals 15° per notch —
+    // i.e. angleDelta / 8 * (120 / 15) = angleDelta. So Qt's angleDelta.y()
+    // already IS in the WHEEL_DELTA units the agent will inject on its side.
+    // Trackpads produce fractional multiples of 120; we forward as-is.
+    const int dy = e->angleDelta().y();
+    if (dy == 0) return;
+    // Clamp to int16 range — a single wheel event delivering > 32k units of
+    // scroll is nonsense from any real input device.
+    std::int16_t clamped;
+    if      (dy > 32000)  clamped = 32000;
+    else if (dy < -32000) clamped = -32000;
+    else                  clamped = static_cast<std::int16_t>(dy);
+    emit inputMouseWheel(clamped);
+    e->accept();
+}
+
 void VideoWidget::keyPressEvent(QKeyEvent* e) {
     const auto vk = static_cast<std::uint16_t>(e->nativeVirtualKey());
     if (vk == 0) return;

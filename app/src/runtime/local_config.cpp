@@ -17,11 +17,11 @@ QString configFilePath() {
 }
 
 QString randomDeviceId() {
-    // 5-digit decimal: 10000..99999 (90000 IDs, ~17-bit entropy — fine for
-    // a ten-people internal deployment where collisions are resolved by
-    // the operator hitting "new id" in practice).
+    // 8-digit decimal: 10000000..99999999 (90M IDs, ~26-bit entropy). Chosen
+    // over the earlier 5-digit format because operators kept hitting
+    // duplicates once the pool grew past a few hundred machines.
     auto* gen = QRandomGenerator::global();
-    const quint64 raw = (gen->generate64() % 90000ULL) + 10000ULL;
+    const quint64 raw = (gen->generate64() % 90000000ULL) + 10000000ULL;
     return QString::number(raw);
 }
 
@@ -39,11 +39,23 @@ bool tryRead(const QString& path, LocalConfig* out) {
         const QString s = v.toString();
         if (!s.isEmpty()) out->recentRemoteIds.append(s);
     }
-    // Reject pre-existing 9-digit IDs from the previous schema so the
-    // upgrade silently re-rolls to the new 5-digit format. There's no
-    // history to preserve — connecting old viewers to new agents still
-    // works as long as both run the upgraded build.
-    if (out->deviceId.length() != 5) return false;
+    // KMBox settings — missing keys are fine on upgrade from an older
+    // config file; they default to "not configured" via LocalConfig's
+    // in-struct initialisers, and we simply don't overwrite them here.
+    if (obj.contains("kmbox_ip"))
+        out->kmboxIp = obj.value("kmbox_ip").toString();
+    if (obj.contains("kmbox_port"))
+        out->kmboxPort = static_cast<quint16>(obj.value("kmbox_port").toInt());
+    if (obj.contains("kmbox_uuid"))
+        out->kmboxUuid = obj.value("kmbox_uuid").toString();
+    if (obj.contains("kmbox_enabled"))
+        out->kmboxEnabled = obj.value("kmbox_enabled").toBool();
+
+    // Reject pre-existing IDs that aren't the current 8-digit format so the
+    // upgrade silently re-rolls. Old 5-digit and 9-digit IDs both get
+    // reissued; there's no history to preserve — connecting old viewers to
+    // new agents still works as long as both run the upgraded build.
+    if (out->deviceId.length() != 8) return false;
     return !out->deviceId.isEmpty();
 }
 
@@ -55,6 +67,10 @@ void SaveLocalConfig(const LocalConfig& cfg) {
     QJsonArray arr;
     for (const auto& s : cfg.recentRemoteIds) arr.append(s);
     obj["recent_remote_ids"] = arr;
+    obj["kmbox_ip"]      = cfg.kmboxIp;
+    obj["kmbox_port"]    = int(cfg.kmboxPort);
+    obj["kmbox_uuid"]    = cfg.kmboxUuid;
+    obj["kmbox_enabled"] = cfg.kmboxEnabled;
     QFile f(configFilePath());
     if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         f.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));

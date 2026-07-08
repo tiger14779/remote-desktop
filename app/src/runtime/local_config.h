@@ -6,9 +6,12 @@
 // Per-machine identity that persists across launches. Stored at
 // %APPDATA%\remote_desktop\local.json.
 //
-// On first run we synthesise a 5-digit deviceId — short enough to dictate
-// across a meeting room, large enough to give 90K IDs in the dynamic
-// registration pool. There's no per-target verifyCode for this build:
+// On first run we synthesise an 8-digit deviceId — still short enough to
+// dictate across a meeting room, and the 90M-ID pool makes birthday-style
+// collisions vanishingly unlikely even with tens of thousands of installs.
+// (The previous 5-digit format had a ~1% collision risk once the deployment
+// reached ~130 machines — the operator kept hitting duplicate IDs.)
+// There's no per-target verifyCode for this build:
 // the deployment is internal-use only and the relay still enforces the
 // global session_token, so an extra per-target code wouldn't add anything
 // the operators wouldn't immediately memorise as a constant.
@@ -18,6 +21,15 @@
 struct LocalConfig {
     QString     deviceId;
     QStringList recentRemoteIds;
+
+    // KMBox NET hardware input backend. When kmboxEnabled, incoming viewer
+    // key/mouse frames are routed through the physical HID box instead of
+    // Windows SendInput — bypasses WeChat Work's remote-control detection.
+    // Empty ip / zero port / empty uuid are the "not configured" sentinel.
+    QString     kmboxIp;
+    quint16     kmboxPort = 0;
+    QString     kmboxUuid;
+    bool        kmboxEnabled = false;
 };
 
 LocalConfig LoadOrCreateLocalConfig();

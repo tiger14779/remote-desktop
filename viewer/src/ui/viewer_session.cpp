@@ -320,6 +320,18 @@ void ViewerSession::sendMouseButton(std::uint8_t button, bool down) {
     client_.SendInput(proto::MsgMouseButton, pl, sizeof(pl), &err);
 }
 
+void ViewerSession::sendMouseWheel(std::int16_t delta) {
+    // Wire format: [i16 BE delta]. delta is in Windows WHEEL_DELTA units
+    // (120 per notch).
+    const std::uint16_t u = static_cast<std::uint16_t>(delta);
+    std::uint8_t pl[2] = {
+        static_cast<std::uint8_t>((u >> 8) & 0xFF),
+        static_cast<std::uint8_t>(u & 0xFF),
+    };
+    std::string err;
+    client_.SendInput(proto::MsgMouseWheel, pl, sizeof(pl), &err);
+}
+
 void ViewerSession::onFramePainted() {
     // If a fresher frame was stashed while we were painting, emit it now
     // (still under framePending_ = true so subsequent arrivals re-stash
