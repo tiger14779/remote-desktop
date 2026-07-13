@@ -3,6 +3,7 @@
 #include "runtime/autostart.h"
 #include "runtime/kmbox_input.h"
 #include "runtime/log_sink.h"
+#include "runtime/permission.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -302,7 +303,7 @@ private:
 } // namespace
 
 // Hardcoded relay endpoint — change here for now, will be configurable later.
-static constexpr const char* kRelayHost = "192.168.1.29";
+static constexpr const char* kRelayHost = "yuancheng.skopn.co";
 static constexpr int         kRelayPort = 7100;
 
 // For the MVP we keep the relay's existing auth model (admin / session_token
@@ -948,6 +949,16 @@ void AppMainWindow::onLocalClipboardChanged() {
 }
 
 void AppMainWindow::onConnectClicked() {
+    // Hidden capability gate — the app can always ACCEPT a remote
+    // connection, but INITIATING one requires the super-password file
+    // sitting next to the exe. Deliberately vague message so operators
+    // without the file don't get a hint about the mechanism.
+    if (!permission::HasControlPermission()) {
+        QMessageBox::warning(this, QStringLiteral("缺少权限"),
+                             QStringLiteral("当前安装未授权远程控制他人。\n"
+                                            "请联系管理员。"));
+        return;
+    }
     const QString remoteId = remoteIdField_->text().trimmed();
     if (remoteId.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("提示"),

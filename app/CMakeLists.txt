@@ -38,6 +38,7 @@ qt_add_executable(app
     src/runtime/single_instance.cpp
     src/runtime/kmbox_net.cpp
     src/runtime/kmbox_input.cpp
+    src/runtime/permission.cpp
     # Windows .rc — embeds ICON resource so explorer / taskbar shows the
     # icon on remote-desktop.exe itself (before any Qt widget code runs).
     resources/app.rc
