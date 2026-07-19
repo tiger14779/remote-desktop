@@ -212,15 +212,21 @@ func (s *Server) handleViewer(conn *safeconn.Conn, first *protocol.Frame) {
 		return
 	}
 
-	if err := s.store.CheckPermission(authReq.Account, connReq.DeviceID); err != nil {
-		log.Printf("[%s] permission denied %q -> %q: %v", addr, authReq.Account, connReq.DeviceID, err)
-		_ = conn.WriteJSON(protocol.MsgConnectResp, protocol.Response{Message: "permission denied"})
-		return
-	}
-
+	// Online check BEFORE permission check. In open-registration mode
+	// CheckPermission passes only for device ids that have REGISTERed since
+	// the relay started — a device that never came online used to surface as
+	// a misleading "permission denied" instead of "device offline". Only
+	// authenticated users reach this point, so revealing online/offline for
+	// an id is fine.
 	dev, ok := s.hub.Lookup(connReq.DeviceID)
 	if !ok {
 		_ = conn.WriteJSON(protocol.MsgConnectResp, protocol.Response{Message: "device offline"})
+		return
+	}
+
+	if err := s.store.CheckPermission(authReq.Account, connReq.DeviceID); err != nil {
+		log.Printf("[%s] permission denied %q -> %q: %v", addr, authReq.Account, connReq.DeviceID, err)
+		_ = conn.WriteJSON(protocol.MsgConnectResp, protocol.Response{Message: "permission denied"})
 		return
 	}
 	if !dev.AttachViewer(conn) {

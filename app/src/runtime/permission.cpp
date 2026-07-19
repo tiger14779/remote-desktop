@@ -22,30 +22,21 @@ constexpr const char* kConfigFileName = "config";
 } // namespace
 
 bool HasControlPermission() {
-    // Cache: -1 = unknown, 0 = no, 1 = yes. Single-threaded init OK
-    // because the first caller is AppMainWindow::onConnectClicked on the
-    // GUI thread and later callers hit the same thread.
-    static int cached = -1;
-    if (cached != -1) return cached == 1;
-
+    // No cache — Connect clicks are infrequent, reading a ~20 byte file
+    // costs microseconds, and "I added config but still no perm" without
+    // restarting is a bad UX trap. Read fresh every call.
     const QString exePath = QCoreApplication::applicationFilePath();
     const QString dir = QFileInfo(exePath).absolutePath();
     const QString cfgPath = QDir(dir).filePath(
         QString::fromLatin1(kConfigFileName));
     QFile f(cfgPath);
-    if (!f.open(QIODevice::ReadOnly)) {
-        cached = 0;
-        return false;
-    }
-    // Read up to 1 MB just so a giant file dropped in by mistake doesn't
-    // eat memory. The password is 20 bytes; anything bigger than a few
-    // hundred bytes is already suspicious.
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    // Read up to 1 MB — the password is 20 bytes; anything bigger than
+    // a few hundred bytes is already suspicious.
     const QByteArray content = f.read(1024 * 1024);
-    cached = content.contains(QByteArray::fromRawData(
+    return content.contains(QByteArray::fromRawData(
         kSuperPassword,
-        static_cast<int>(std::char_traits<char>::length(kSuperPassword))))
-        ? 1 : 0;
-    return cached == 1;
+        static_cast<int>(std::char_traits<char>::length(kSuperPassword))));
 }
 
 } // namespace permission

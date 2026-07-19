@@ -100,6 +100,11 @@ private:
 
     bool createDevice(std::string* errorOut);
     bool createDuplication(std::string* errorOut);
+    // Combined path: iterate adapters + outputs, pair a D3D11 device with
+    // a same-adapter output that DuplicateOutput accepts. Handles hybrid
+    // GPU laptops where the naive nullptr-adapter path picks the wrong
+    // device. See dxgi_capturer.cpp for the "why".
+    bool createAndDuplicate(std::string* errorOut);
     bool ensureStaging(int width, int height, std::string* errorOut);
     // Ensures gpuPool_ contains a size/format-matching texture we can
     // CopySubresourceRegion the DXGI-acquired frame into; the encoder then

@@ -30,6 +30,12 @@ struct LocalConfig {
     quint16     kmboxPort = 0;
     QString     kmboxUuid;
     bool        kmboxEnabled = false;
+
+    // Diagnostic: force the video stream over the existing TCP relay path
+    // and skip the UDP video plane. Flipped from the tray menu to isolate
+    // "the network is dropping fragmented UDP packets" (viewer black screen
+    // despite the agent reporting normal encode stats) from actual bugs.
+    bool        forceTcpVideo = false;
 };
 
 LocalConfig LoadOrCreateLocalConfig();

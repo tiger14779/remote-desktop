@@ -43,6 +43,11 @@ public:
         // UDP_MY_CANDIDATES: peer told us (via relay forward) about its own
         // local candidates (LAN IPs) we should also try probing.
         std::function<void(const std::uint8_t* data, std::size_t size)> onUdpPeerLan;
+        // REQUEST_IDR: viewer lost UDP frame(s) and wants a keyframe resync.
+        std::function<void()> onRequestIdr;
+        // USE_TCP_VIDEO: viewer's watchdog declared the UDP path dead; drop
+        // the UDP xport and send video over TCP for the rest of the session.
+        std::function<void()> onUseTcpVideo;
     };
 
     bool ConnectAndRegister(const Config& cfg, std::string* errorOut);

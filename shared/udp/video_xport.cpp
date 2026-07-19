@@ -177,6 +177,23 @@ void VideoUdpXport::recvLoop() {
     auto lastRegister = std::chrono::steady_clock::now();
     auto lastProbe    = std::chrono::steady_clock::time_point::min();
 
+    // Frame-loss reporting. All state lives on this thread. Rate-limited so
+    // sustained loss produces a steady trickle of callbacks (the viewer turns
+    // each into a REQUEST_IDR), not a storm.
+    constexpr auto kLossCbMinInterval = std::chrono::milliseconds(250);
+    auto lastLossCb = std::chrono::steady_clock::time_point{};
+    auto reportLoss = [&](std::chrono::steady_clock::time_point now) {
+        if (!lossCb_) return;
+        if (now - lastLossCb < kLossCbMinInterval) return;
+        lastLossCb = now;
+        lossCb_();
+    };
+    // Evict stale half-assembled frames on a steady cadence. The old code
+    // only evicted inside the recv-timeout branch, which under continuous
+    // (lossy) traffic never fires — incomplete frames would linger until a
+    // quiet moment.
+    auto lastEvict = std::chrono::steady_clock::now();
+
     while (!shouldExit_.load()) {
         std::string err;
         const int got = sock_.RecvFrom(buf.data(), buf.size(),
@@ -213,6 +230,26 @@ void VideoUdpXport::recvLoop() {
             }
         }
 
+        // Periodic stale-frame eviction (runs whether or not a datagram
+        // arrived this iteration). An evicted incomplete frame is definite
+        // loss — some of its fragments never made it.
+        if (now - lastEvict >= std::chrono::milliseconds(100)) {
+            lastEvict = now;
+            bool evicted = false;
+            {
+                std::lock_guard<std::mutex> g(pendingMu_);
+                for (auto it = pending_.begin(); it != pending_.end(); ) {
+                    if (now - it->second.firstSeen > kFrameAssemblyTimeout) {
+                        it = pending_.erase(it);
+                        evicted = true;
+                    } else {
+                        ++it;
+                    }
+                }
+            }
+            if (evicted) reportLoss(now);
+        }
+
         if (got < 0) {
             if (shouldExit_.load()) return;
             // Hard error — log once a second of throttled noise would mean.
@@ -220,18 +257,7 @@ void VideoUdpXport::recvLoop() {
             std::cerr << "[udp] recvLoop: " << err << "\n";
             return;
         }
-        if (got == 0) {
-            // Timeout — opportunistic time to evict stale partial frames.
-            std::lock_guard<std::mutex> g(pendingMu_);
-            for (auto it = pending_.begin(); it != pending_.end(); ) {
-                if (now - it->second.firstSeen > kFrameAssemblyTimeout) {
-                    it = pending_.erase(it);
-                } else {
-                    ++it;
-                }
-            }
-            continue;
-        }
+        if (got == 0) continue;  // recv timeout — nothing else to do
         if (got < 5) continue;
 
         const std::uint32_t sid = readBE32(&buf[0]);
@@ -283,6 +309,7 @@ void VideoUdpXport::recvLoop() {
 
         std::vector<std::uint8_t> assembled;
         bool deliver = false;
+        bool gap = false;
         {
             std::lock_guard<std::mutex> g(pendingMu_);
             auto& pf = pending_[frameId];
@@ -303,10 +330,18 @@ void VideoUdpXport::recvLoop() {
                     assembled.insert(assembled.end(), c.begin(), c.end());
                 }
                 pending_.erase(frameId);
-                if (frameId > highestDelivered_) highestDelivered_ = frameId;
+                if (frameId > highestDelivered_) {
+                    // Skipped ids = frames whose fragments never completed.
+                    // (Out-of-order completion can false-positive here; the
+                    // cost is one rate-limited extra IDR, acceptable.)
+                    gap = highestDelivered_ != 0 &&
+                          frameId > highestDelivered_ + 1;
+                    highestDelivered_ = frameId;
+                }
                 deliver = true;
             }
         }
+        if (gap) reportLoss(now);
         if (deliver && frameCb_) {
             frameCb_(assembled.data(), assembled.size());
         }

@@ -5,6 +5,7 @@
 #include "input/input_injector.h"
 #include "net/frame.h"
 #include "net/agent_relay_client.h"
+#include "net/net_prefs.h"
 #include "udp/lan_ips.h"
 #include "udp/video_xport.h"
 
@@ -50,6 +51,24 @@ public:
         udp_ = udp;
     }
 
+    // Viewer asked for a keyframe (it lost UDP frames). The next encoded
+    // frame becomes an IDR, rate-limited to one forced IDR per 500ms so a
+    // request storm can't turn the stream into all-keyframes.
+    void RequestIdr() { idrRequested_.store(true); }
+
+    // Viewer's watchdog declared the UDP path dead. Drop the UDP xport
+    // (in-flight send finishes first — sends hold xportMu_) and restart the
+    // encode loop so it re-inits with the low-bandwidth TCP profile.
+    // Caller may free the xport as soon as this returns.
+    void FallbackToTcp() {
+        {
+            std::lock_guard<std::mutex> g(xportMu_);
+            udp_ = nullptr;
+        }
+        tcpFallback_.store(true);
+        reinit_.store(true);
+    }
+
     void Stop() {
         {
             std::lock_guard<std::mutex> g(mu_);
@@ -61,6 +80,11 @@ public:
     }
 
     void OnSessionStart() {
+        // Fresh session: forget any TCP fallback / pending IDR from the
+        // previous viewer so the new one gets a clean UDP attempt.
+        tcpFallback_.store(false);
+        idrRequested_.store(false);
+        reinit_.store(false);
         { std::lock_guard<std::mutex> g(mu_); sessionActive_ = true; }
         cv_.notify_all();
     }
@@ -94,23 +118,40 @@ private:
         }
         if (!sessionActive_) return;
 
+        // Force-TCP mode targets links that couldn't sustain UDP (typically
+        // IoT SIMs / mobile hotspots with heavy loss and 1-3 Mbps ceilings).
+        // TCP through the relay adds a hop and head-of-line-blocks on retx,
+        // so the default 30fps @ 4Mbps @ 1440p profile stalls badly. Pick a
+        // low-bandwidth profile per-session — cheap, no reconfig needed by
+        // the user beyond the tray toggle.
+        const bool lowBw = net_prefs::ForceTcpVideo() || tcpFallback_.load();
+        // TCP profile: 1080p @ 15fps @ 3Mbps. Frame rate takes the cut, not
+        // resolution — for remote desktop work, text legibility beats motion
+        // smoothness, and 720p was visibly blurry on 1440p+ sources. 3Mbps
+        // still fits comfortably under the ~20Mbps ceiling the 128KB
+        // SO_SNDBUF imposes at 50ms RTT through the relay.
+        const int sessFps         = lowBw ? std::min(fps_, 15)        : fps_;
+        const int sessBitrateKbps = lowBw ? std::min(bitrateKbps_, 3000) : bitrateKbps_;
+        const int sessMaxHeight   = lowBw ? std::min(maxHeight_ > 0 ? maxHeight_ : 1080, 1080)
+                                          : maxHeight_;
+
         H264Encoder enc;
         H264Encoder::Config ec;
         ec.srcWidth = frame.width;
         ec.srcHeight = frame.height;
-        if (maxHeight_ > 0 && frame.height > maxHeight_) {
-            ec.height = maxHeight_;
+        if (sessMaxHeight > 0 && frame.height > sessMaxHeight) {
+            ec.height = sessMaxHeight;
             ec.width = static_cast<int>(
-                static_cast<int64_t>(frame.width) * maxHeight_ / frame.height);
+                static_cast<int64_t>(frame.width) * sessMaxHeight / frame.height);
             ec.width &= ~1;
             ec.height &= ~1;
         } else {
             ec.width = frame.width & ~1;
             ec.height = frame.height & ~1;
         }
-        ec.fps = fps_;
-        ec.bitrateKbps = bitrateKbps_;
-        ec.gopSize = fps_;
+        ec.fps = sessFps;
+        ec.bitrateKbps = sessBitrateKbps;
+        ec.gopSize = sessFps;
         // Zero-copy path is only sound when source and encoder dimensions
         // match — NVENC won't scale a D3D11 input texture for us. If we're
         // asking for a downscale (maxHeight cap kicked in), fall back to
@@ -135,7 +176,7 @@ private:
         // waiting for a new present, then move on so a long idle still gets
         // statistics + the sessionActive_ check.
         const int captureTimeoutMs =
-            std::max(1, static_cast<int>(std::chrono::milliseconds(1000 / fps_).count()));
+            std::max(1, static_cast<int>(std::chrono::milliseconds(1000 / sessFps).count()));
         int64_t pts = 0;
         // First-frame send happens on the first main-loop iteration below —
         // for GPU mode this must go through EncodeFrameGpu, so we can't
@@ -181,7 +222,7 @@ private:
         // actually matches its ctx->framerate metadata (rate control
         // depends on this) and the viewer never has more than one
         // frame's worth in flight.
-        const auto frameInterval = std::chrono::microseconds(1000000 / fps_);
+        const auto frameInterval = std::chrono::microseconds(1000000 / sessFps);
         auto frameDeadline = std::chrono::steady_clock::now();
 
         // GPU-mode state: cache the last-captured D3D11 texture so heartbeat
@@ -202,6 +243,12 @@ private:
         }
 
         while (sessionActive_) {
+            // TCP fallback (or any future profile change) requested: return
+            // with the session still active — run() immediately re-enters
+            // streamUntilSessionEnd, which re-picks the profile and re-inits
+            // the encoder. The new encoder's first frame is an IDR, so the
+            // viewer resyncs without an explicit keyframe request.
+            if (reinit_.exchange(false)) return;
             // Sleep until the next frame slot so we send at most fps_
             // frames/sec regardless of how fast encode/DXGI actually run.
             // First iter has frameDeadline == now, so it doesn't sleep.
@@ -225,7 +272,20 @@ private:
             }
             if (r == DxgiCapturer::Result::kError) {
                 std::cerr << "[agent] capture error: " << err << " — reinit\n";
-                if (!cap_->Init(&err)) std::this_thread::sleep_for(500ms);
+                // The pool texture dies with the old device — never encode
+                // from it again, even if Init below fails and we loop.
+                lastGpuTex = nullptr;
+                if (!cap_->Init(&err)) {
+                    std::this_thread::sleep_for(500ms);
+                    continue;
+                }
+                if (gpuMode) {
+                    // Init recreated the D3D11 device; NVENC's hw frame ctx
+                    // is bound to the dead one. Rebuild the whole encode
+                    // pipeline — run() re-enters immediately (session still
+                    // active) and the fresh encoder leads with an IDR.
+                    return;
+                }
                 continue;
             }
             bool isHeartbeat = false;
@@ -244,15 +304,28 @@ private:
                 isHeartbeat = true;
             }
 
+            // Viewer-requested keyframe (REQUEST_IDR after UDP frame loss).
+            // Honour at most one forced IDR per 500ms; a request landing
+            // inside the window stays pending and is honoured when it opens.
+            bool forceIdr = false;
+            if (idrRequested_.load()) {
+                const auto nowIdr = std::chrono::steady_clock::now();
+                if (nowIdr - lastForcedIdrAt_ >= std::chrono::milliseconds(500)) {
+                    forceIdr = true;
+                    lastForcedIdrAt_ = nowIdr;
+                    idrRequested_.store(false);
+                }
+            }
+
             std::size_t thisBytes = 0;
             long long encMs = 0, sendMs = 0;
             bool ok;
             if (gpuMode) {
                 if (!lastGpuTex) continue;  // nothing to send yet
-                ok = encodeAndSendGpu(enc, lastGpuTex, pts++, /*forceIdr=*/false,
+                ok = encodeAndSendGpu(enc, lastGpuTex, pts++, forceIdr,
                                       &thisBytes, &encMs, &sendMs, &err);
             } else {
-                ok = encodeAndSend(enc, frame, pts++, /*forceIdr=*/false,
+                ok = encodeAndSend(enc, frame, pts++, forceIdr,
                                     &thisBytes, &encMs, &sendMs, &err);
             }
             if (!ok) {
@@ -309,6 +382,39 @@ private:
         }
     }
 
+    // Ship encoded packets over whichever path is current. UDP sends happen
+    // WITH xportMu_ held so FallbackToTcp / SetUdpXport(nullptr) can't yank
+    // the xport out from under an in-flight SendFrame — once either returns,
+    // the caller may safely destroy the xport. TCP sends run unlocked
+    // (client_ outlives the pump, and a back-pressured TCP write can block
+    // for seconds — holding the mutex there would stall FallbackToTcp).
+    bool sendPackets(const std::vector<std::vector<std::uint8_t>>& pkts,
+                     std::size_t* totalOut, std::string* err) {
+        std::size_t total = 0;
+        bool sentViaUdp = false;
+        {
+            std::lock_guard<std::mutex> g(xportMu_);
+            if (udp_) {
+                for (const auto& p : pkts) {
+                    // Failure on UDP is non-fatal in spirit (datagrams are
+                    // unreliable anyway) but a hard socket error still
+                    // aborts the frame, matching the old behaviour.
+                    if (!udp_->SendFrame(p.data(), p.size(), err)) return false;
+                    total += p.size();
+                }
+                sentViaUdp = true;
+            }
+        }
+        if (!sentViaUdp) {
+            for (const auto& p : pkts) {
+                if (!client_->SendVideoFrame(p.data(), p.size(), err)) return false;
+                total += p.size();
+            }
+        }
+        if (totalOut) *totalOut = total;
+        return true;
+    }
+
     // GPU-direct variant: encode straight from a D3D11 texture the caller
     // just captured with DxgiCapturer::CaptureFrameGpu. Same output shape
     // as encodeAndSend so callers can pick per frame.
@@ -322,18 +428,8 @@ private:
         const auto t0 = std::chrono::steady_clock::now();
         if (!enc.EncodeFrameGpu(tex, pts, forceIdr, &pkts, err)) return false;
         const auto tEnc = std::chrono::steady_clock::now();
-        VideoUdpXport* xport = nullptr;
-        {
-            std::lock_guard<std::mutex> g(xportMu_);
-            xport = udp_;
-        }
         std::size_t total = 0;
-        for (const auto& p : pkts) {
-            bool ok = xport ? xport->SendFrame(p.data(), p.size(), err)
-                            : client_->SendVideoFrame(p.data(), p.size(), err);
-            if (!ok) return false;
-            total += p.size();
-        }
+        if (!sendPackets(pkts, &total, err)) return false;
         const auto tSent = std::chrono::steady_clock::now();
         if (encodeMsOut) *encodeMsOut =
             std::chrono::duration_cast<std::chrono::milliseconds>(tEnc - t0).count();
@@ -355,26 +451,8 @@ private:
             return false;
         }
         const auto tEnc = std::chrono::steady_clock::now();
-        VideoUdpXport* xport = nullptr;
-        {
-            std::lock_guard<std::mutex> g(xportMu_);
-            xport = udp_;
-        }
         std::size_t total = 0;
-        for (const auto& p : pkts) {
-            bool ok;
-            if (xport) {
-                // UDP path: one xport->SendFrame per encoded NAL — the xport
-                // internally fragments to fit UDP MTU. Failure on UDP is
-                // non-fatal (datagrams are unreliable anyway), so we just
-                // log via err and keep going.
-                ok = xport->SendFrame(p.data(), p.size(), err);
-            } else {
-                ok = client_->SendVideoFrame(p.data(), p.size(), err);
-            }
-            if (!ok) return false;
-            total += p.size();
-        }
+        if (!sendPackets(pkts, &total, err)) return false;
         const auto tSent = std::chrono::steady_clock::now();
         if (encodeMsOut) *encodeMsOut =
             std::chrono::duration_cast<std::chrono::milliseconds>(tEnc - t0).count();
@@ -398,6 +476,14 @@ private:
     // the state the pump runs in until UDP_INFO is received.
     std::mutex xportMu_;
     VideoUdpXport* udp_ = nullptr;
+
+    // Viewer-driven video plane control (REQUEST_IDR / USE_TCP_VIDEO).
+    std::atomic<bool> idrRequested_{false};
+    std::atomic<bool> reinit_{false};
+    std::atomic<bool> tcpFallback_{false};
+    // Only touched on the pump thread; default epoch value keeps the first
+    // request instantly honourable.
+    std::chrono::steady_clock::time_point lastForcedIdrAt_{};
 };
 
 } // namespace
@@ -461,9 +547,19 @@ void AgentRunner::runLoop(Config cfg) {
     DxgiCapturer cap;
     std::string err;
     if (!cap.Init(&err)) {
-        emit status(QStringLiteral("capture init failed: %1")
+        // NOT fatal. Desktop Duplication is unavailable inside RDP sessions,
+        // on headless boxes, and while the secure desktop is up — but the
+        // relay connection, device registration, input and file transfer all
+        // still work, and StreamPump retries cap.Init every 500ms once a
+        // session starts. Bailing out here used to keep the device
+        // permanently offline (viewer saw a misleading "permission denied")
+        // just because the app was launched over RDP.
+        emit status(QStringLiteral("capture unavailable (%1) — going online "
+                                   "anyway; video starts once a local desktop "
+                                   "session exists")
                         .arg(QString::fromStdString(err)));
-        return;
+        std::cerr << "[agent] capture init failed: " << err
+                  << " — continuing without video; will retry per-session\n";
     }
 
     int backoffSec = 1;
@@ -556,6 +652,16 @@ void AgentRunner::runLoop(Config cfg) {
         // SendVideoFrame goes over UDP instead of TCP.
         std::unique_ptr<VideoUdpXport> udpXport;
         cb.onUdpInfo = [&](const std::uint8_t* d, std::size_t s) {
+            // UDP video is the default (lower latency + fewer HoL blocks
+            // than TCP). Kill-switch honoured here — RD_DISABLE_UDP=1 at
+            // startup or the tray "强制 TCP" toggle both flip this flag.
+            // Useful when the network path drops fragmented IDR packets and
+            // the viewer sees a black screen.
+            if (net_prefs::ForceTcpVideo()) {
+                std::cerr << "[agent] force-TCP is ON — UDP video path "
+                             "disabled, falling back to TCP\n";
+                return;
+            }
             auto doc = QJsonDocument::fromJson(QByteArray::fromRawData(
                 reinterpret_cast<const char*>(d), static_cast<int>(s)));
             if (!doc.isObject()) return;
@@ -636,6 +742,18 @@ void AgentRunner::runLoop(Config cfg) {
         };
         cb.onUdpPeerLan = [addCandidates](const std::uint8_t* d, std::size_t s) {
             addCandidates(d, s, "lan");
+        };
+        cb.onRequestIdr = [&pump]() {
+            pump.RequestIdr();
+        };
+        cb.onUseTcpVideo = [&]() {
+            std::cerr << "[agent] viewer reports UDP video down — "
+                         "switching to TCP video (low-bandwidth profile)\n";
+            // FallbackToTcp waits out any in-flight UDP send, so destroying
+            // the xport right after is safe. Runs on the Run() dispatch
+            // thread — same thread as onUdpInfo, so no racing creation.
+            pump.FallbackToTcp();
+            udpXport.reset();
         };
         client.Run(cb);
         // Tear down the UDP xport (if any) before the pump is stopped so

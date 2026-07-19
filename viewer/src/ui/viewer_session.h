@@ -77,6 +77,13 @@ private:
     // Returns true if stop was requested during the wait.
     bool waitOrStop(std::chrono::milliseconds dt);
 
+    // Sends REQUEST_IDR to the agent (via relay forward), at most one per
+    // 300ms. Called from the UDP recv thread on frame loss and from the
+    // decode path on decoder errors — both mean the picture is corrupt
+    // until a keyframe arrives.
+    void requestIdrRateLimited();
+    std::atomic<long long> lastIdrReqMs_{0};
+
     ViewerRelayClient client_;
     H264Decoder decoder_;
     std::atomic<bool> stopping_{false};

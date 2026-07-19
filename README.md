@@ -148,3 +148,7 @@ E:\programme\SynologyDrive\work_project\newboos\qt_WxSight\src
 并且自动保存配置文件, 增加勾选框  kmbox硬件键鼠 , 勾选后 被控端 键鼠输入 使用硬件 , 防止企业微信掉线
 ```
 
+
+
+安装命令
+sudo systemctl stop remote-desktop-relay 2>/dev/null; sudo tar xzf /tmp/relay-ubuntu22-dev-20260713.tar.gz -C /opt/ && sudo bash /opt/relay-ubuntu22-dev-20260713/deploy/install.sh

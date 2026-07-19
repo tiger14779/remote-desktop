@@ -9,15 +9,21 @@ Type=simple
 User=relay
 Group=relay
 WorkingDirectory=/opt/remote-desktop-relay
-ExecStart=/opt/remote-desktop-relay/relay \
-    -listen :7100 \
-    -config /opt/remote-desktop-relay/config.json
+ExecStart=/opt/remote-desktop-relay/relay -listen :7100 -config /opt/remote-desktop-relay/config.json -quiet
 Restart=always
 RestartSec=5
 
-# Logging — everything goes to journald, view with `journalctl -u remote-desktop-relay`
-StandardOutput=journal
-StandardError=journal
+# Zero-retention logging. -quiet in the ExecStart above silences all
+# per-session metadata inside the relay process; StandardOutput=null tells
+# systemd not to funnel process output into journald at all. Startup and
+# systemd's own service state (started/stopped/failed) still land in
+# journald because they come from systemd itself, but there is no
+# who-connected-to-whom trail preserved anywhere on disk.
+#
+# If you need to debug: drop `-quiet` from ExecStart AND change the two
+# lines below to `journal`, then `systemctl daemon-reload && restart`.
+StandardOutput=null
+StandardError=null
 
 # Hardening (relay is read-only at runtime — it loads config.json on start and never writes to disk)
 NoNewPrivileges=true

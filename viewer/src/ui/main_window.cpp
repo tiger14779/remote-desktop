@@ -221,10 +221,24 @@ MainWindow::MainWindow(const ViewerSession::Config& cfg, QWidget* parent)
 MainWindow::~MainWindow() {
     if (session_) session_->requestStop();
     workerThread_.quit();
-    workerThread_.wait();
+    // Bounded wait: if a stuck send/recv keeps the worker alive past this,
+    // fall through to QThread::terminate rather than hanging the GUI event
+    // loop forever on close. Historical bug: closesocket() alone didn't wake
+    // a blocked recv when a winsock LSP was in the stack, so wait() blocked
+    // indefinitely. TcpClient::Close now shuts down first, but keep this as
+    // a belt-and-braces guard — a hung GUI is worse than leaking a socket.
+    constexpr int kJoinBudgetMs = 3000;
+    if (!workerThread_.wait(kJoinBudgetMs)) {
+        qWarning("viewer worker did not exit in %dms — terminating", kJoinBudgetMs);
+        workerThread_.terminate();
+        workerThread_.wait();
+    }
 }
 
 void MainWindow::closeEvent(QCloseEvent* e) {
+    // Fire the stop early so the worker gets a head-start on tearing down
+    // the socket while Qt is still walking the widget tree; by the time
+    // ~MainWindow runs, wait() usually returns immediately.
     if (session_) session_->requestStop();
     e->accept();
 }

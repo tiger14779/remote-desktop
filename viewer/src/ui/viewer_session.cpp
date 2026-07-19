@@ -1,6 +1,7 @@
 #include "ui/viewer_session.h"
 
 #include "net/frame.h"
+#include "net/net_prefs.h"
 #include "udp/lan_ips.h"
 #include "udp/video_xport.h"
 
@@ -20,7 +21,27 @@
 
 using namespace std::chrono_literals;
 
+namespace {
+long long steadyNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// The agent re-encodes at least every 50ms while a session is active, so a
+// healthy UDP video plane never goes this long without delivering a frame.
+constexpr long long kUdpDeadAfterMs = 3000;
+} // namespace
+
 ViewerSession::ViewerSession(QObject* parent) : QObject(parent) {}
+
+void ViewerSession::requestIdrRateLimited() {
+    const long long now = steadyNowMs();
+    long long last = lastIdrReqMs_.load(std::memory_order_relaxed);
+    if (now - last < 300) return;
+    if (!lastIdrReqMs_.compare_exchange_strong(last, now)) return;  // lost race
+    std::string err;
+    client_.SendFrameRaw(proto::MsgRequestIdr, nullptr, 0, &err);
+}
 
 void ViewerSession::requestStop() {
     {
@@ -99,9 +120,10 @@ void ViewerSession::start(Config cfg) {
         std::string err;
         const auto tDec0 = std::chrono::steady_clock::now();
         if (!decoder_.DecodePacket(data, size, &frames, &err)) {
-            // Keep going on transient decode errors — a missing keyframe will
-            // recover on the next IDR.
+            // Keep going on transient decode errors — but nudge the agent
+            // for an IDR so "transient" doesn't mean "until the next GOP".
             qWarning("decode: %s", err.c_str());
+            requestIdrRateLimited();
             return;
         }
         const auto tDec1 = std::chrono::steady_clock::now();
@@ -166,9 +188,28 @@ void ViewerSession::start(Config cfg) {
     // UDP video plane: created on demand when UDP_INFO arrives. Lifetime
     // brackets the relay client's Run() call so teardown is automatic on
     // disconnect / reconnect.
+    //
+    // udpMu guards the shared_ptr itself: it's written by the Run() dispatch
+    // thread (onUdpInfo, teardown) and read by the heartbeat thread's
+    // UDP-dead watchdog. The xport object's own methods are internally
+    // thread-safe; only the pointer swap needs the lock.
     std::shared_ptr<VideoUdpXport> udpXport;
-    cb.onUdpInfo = [&udpXport, processVideoBytes, &cfg, this]
+    std::mutex udpMu;
+    // Watchdog state. 0 = no UDP frame seen yet on the current xport; the
+    // watchdog then measures from udpStartMs instead.
+    std::atomic<long long> lastUdpFrameMs{0};
+    std::atomic<long long> udpStartMs{0};
+    cb.onUdpInfo = [&udpXport, &udpMu, &lastUdpFrameMs, &udpStartMs,
+                    processVideoBytes, &cfg, this]
                    (const std::uint8_t* d, std::size_t s) {
+        // UDP video is the default. Kill-switch honoured here — mirrors the
+        // agent side; either RD_DISABLE_UDP=1 at startup or the tray "强制
+        // TCP" toggle flips the shared flag.
+        if (net_prefs::ForceTcpVideo()) {
+            std::cerr << "[viewer] force-TCP is ON — staying on TCP video "
+                         "path\n";
+            return;
+        }
         auto doc = QJsonDocument::fromJson(QByteArray::fromRawData(
             reinterpret_cast<const char*>(d), static_cast<int>(s)));
         if (!doc.isObject()) return;
@@ -190,8 +231,22 @@ void ViewerSession::start(Config cfg) {
             std::cerr << "[viewer] UDP direct path up — peer " << h
                       << ":" << p << " (bypassing relay)\n";
         });
-        x->StartReceiver(processVideoBytes);
-        udpXport = x;
+        // Frame loss (id gap / half-frame timeout) → ask the agent for a
+        // keyframe so the corruption window is one round-trip, not a GOP.
+        x->SetFrameLossCallback([this]() { requestIdrRateLimited(); });
+        lastUdpFrameMs.store(0);
+        udpStartMs.store(steadyNowMs());
+        // Stamp arrival time for the UDP-dead watchdog, then hand off to the
+        // shared decode path.
+        x->StartReceiver([processVideoBytes, &lastUdpFrameMs]
+                         (const std::uint8_t* d, std::size_t s) {
+            lastUdpFrameMs.store(steadyNowMs(), std::memory_order_relaxed);
+            processVideoBytes(d, s);
+        });
+        {
+            std::lock_guard<std::mutex> g(udpMu);
+            udpXport = x;
+        }
         // Two spots so operators can find it: the small viewer status bar,
         // AND the app-wide log panel (via stderr -> LogSink) so the main
         // window shows it even when the viewer popup is minimised.
@@ -203,7 +258,7 @@ void ViewerSession::start(Config cfg) {
         // Send our LAN candidates to the peer over the relay's TCP forward.
         // Same-LAN case: the peer will probe our 192.168.x.y and get an
         // instant reply, punching direct with < 1ms latency.
-        const int localUdpPort = udpXport->LocalPort();
+        const int localUdpPort = x->LocalPort();
         const auto lanIps = udp_lan::LocalIPv4Addresses();
         QJsonArray arr;
         for (const auto& ip : lanIps) {
@@ -223,9 +278,14 @@ void ViewerSession::start(Config cfg) {
                   << " LAN candidate(s) via TCP\n";
     };
     // Shared parser for both flavours of candidate lists.
-    auto addCandidates = [&udpXport, this](const std::uint8_t* d, std::size_t s,
+    auto addCandidates = [&udpXport, &udpMu, this](const std::uint8_t* d, std::size_t s,
                                              const char* origin) {
-        if (!udpXport) return;
+        std::shared_ptr<VideoUdpXport> xp;
+        {
+            std::lock_guard<std::mutex> g(udpMu);
+            xp = udpXport;
+        }
+        if (!xp) return;
         auto doc = QJsonDocument::fromJson(QByteArray::fromRawData(
             reinterpret_cast<const char*>(d), static_cast<int>(s)));
         if (!doc.isObject()) return;
@@ -235,7 +295,7 @@ void ViewerSession::start(Config cfg) {
             const QString host = obj.value("host").toString();
             const int port = obj.value("port").toInt();
             if (host.isEmpty() || port <= 0) continue;
-            udpXport->AddDirectCandidate(host.toStdString(), port);
+            xp->AddDirectCandidate(host.toStdString(), port);
             std::cerr << "[viewer] NAT-T probing " << host.toStdString()
                       << ":" << port << " (" << origin << ")\n";
         }
@@ -267,12 +327,41 @@ void ViewerSession::start(Config cfg) {
         backoffSec = 1;
 
         // Heartbeat thread. 5s cadence, wakes itself every 100ms so we shut
-        // down quickly on disconnect / stop.
+        // down quickly on disconnect / stop. Doubles as the UDP-dead
+        // watchdog: the agent re-encodes at least every 50ms while a session
+        // is active, so a healthy UDP video plane never goes 3s silent. If
+        // ours does, the path is dead (firewall eating UDP, carrier NAT,
+        // fragmented-IDR blackhole) — tear it down, tell the agent to send
+        // video over TCP instead, and carry on. No manual toggle needed.
         std::atomic<bool> hbStop{false};
-        std::thread hb([this, &hbStop]() {
+        std::thread hb([this, &hbStop, &udpXport, &udpMu,
+                        &lastUdpFrameMs, &udpStartMs]() {
+            auto checkUdpDead = [&]() {
+                std::shared_ptr<VideoUdpXport> xp;
+                {
+                    std::lock_guard<std::mutex> g(udpMu);
+                    xp = udpXport;
+                }
+                if (!xp) return;
+                const long long last = lastUdpFrameMs.load(std::memory_order_relaxed);
+                const long long ref = last ? last : udpStartMs.load();
+                if (steadyNowMs() - ref < kUdpDeadAfterMs) return;
+                {
+                    std::lock_guard<std::mutex> g(udpMu);
+                    udpXport.reset();
+                }
+                xp->Stop();
+                std::string e;
+                client_.SendFrameRaw(proto::MsgUseTcpVideo, nullptr, 0, &e);
+                emit status(QStringLiteral("UDP 视频不通 — 已自动切换 TCP"));
+                std::cerr << "[viewer] no UDP video for " << kUdpDeadAfterMs
+                          << "ms — sent USE_TCP_VIDEO, falling back to TCP "
+                             "video path\n";
+            };
             while (!hbStop.load()) {
                 for (int i = 0; i < 50 && !hbStop.load(); ++i) {
                     std::this_thread::sleep_for(100ms);
+                    if ((i % 5) == 4) checkUdpDead();
                 }
                 if (hbStop.load()) break;
                 std::string hbErr;
@@ -282,16 +371,23 @@ void ViewerSession::start(Config cfg) {
 
         client_.Run(cb);
 
+        // Stop the heartbeat/watchdog thread FIRST so it can't race the UDP
+        // teardown below.
+        hbStop.store(true);
+        hb.join();
+
         // Tear down the UDP transport (if it ever came up) before sleeping
         // for the reconnect — it owns a recv thread that must join before
         // we redo the dance.
-        if (udpXport) {
-            udpXport->Stop();
-            udpXport.reset();
+        {
+            std::shared_ptr<VideoUdpXport> xp;
+            {
+                std::lock_guard<std::mutex> g(udpMu);
+                xp = std::move(udpXport);
+                udpXport.reset();
+            }
+            if (xp) xp->Stop();
         }
-
-        hbStop.store(true);
-        hb.join();
 
         if (stopping_) break;
         emit status(QStringLiteral("disconnected — reconnecting in %1s").arg(backoffSec));

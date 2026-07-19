@@ -58,6 +58,16 @@ enum MessageType : std::uint8_t {
     //   {"candidates": [{"host":"1.2.3.4","port":51849}, ...]}
     MsgUdpCandidates   = 0x61,
     MsgUdpMyCandidates = 0x62,
+    // Video plane control, viewer -> agent (relay blind-forwards viewer
+    // frames, so no relay change is needed). Both carry an empty payload.
+    //   MsgRequestIdr  — viewer lost UDP frame(s); agent should force an IDR
+    //                    on its next encode so the picture resyncs.
+    //   MsgUseTcpVideo — viewer's UDP watchdog saw no video for several
+    //                    seconds; agent should drop the UDP xport and send
+    //                    video over the TCP relay path for the rest of the
+    //                    session (low-bandwidth encoder profile).
+    MsgRequestIdr      = 0x63,
+    MsgUseTcpVideo     = 0x64,
 
     MsgRegisterResp  = 0x81,
     MsgAuthResp      = 0x82,
@@ -86,6 +96,8 @@ inline const char* MessageTypeName(std::uint8_t t) {
         case MsgUdpInfo:       return "UDP_INFO";
         case MsgUdpCandidates:   return "UDP_CANDIDATES";
         case MsgUdpMyCandidates: return "UDP_MY_CANDIDATES";
+        case MsgRequestIdr:      return "REQUEST_IDR";
+        case MsgUseTcpVideo:     return "USE_TCP_VIDEO";
         case MsgRegisterResp: return "REGISTER_RESP";
         case MsgAuthResp:     return "AUTH_RESP";
         case MsgConnectResp:  return "CONNECT_RESP";

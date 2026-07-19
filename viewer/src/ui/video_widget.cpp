@@ -1,5 +1,6 @@
 #include "ui/video_widget.h"
 
+#include <QFocusEvent>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
@@ -136,11 +137,35 @@ void VideoWidget::wheelEvent(QWheelEvent* e) {
 void VideoWidget::keyPressEvent(QKeyEvent* e) {
     const auto vk = static_cast<std::uint16_t>(e->nativeVirtualKey());
     if (vk == 0) return;
+    // Auto-repeat: Windows re-sends the down every ~30ms while a key is
+    // held. Track only the first one — otherwise heldKeys_ churns and the
+    // agent gets duplicate keyDown packets it doesn't need.
+    if (!e->isAutoRepeat()) heldKeys_.insert(vk);
     emit inputKey(vk, true);
 }
 
 void VideoWidget::keyReleaseEvent(QKeyEvent* e) {
     const auto vk = static_cast<std::uint16_t>(e->nativeVirtualKey());
     if (vk == 0) return;
+    if (!e->isAutoRepeat()) heldKeys_.erase(vk);
     emit inputKey(vk, false);
+}
+
+void VideoWidget::focusOutEvent(QFocusEvent* e) {
+    // Alt+Tab / clicking another window / Ctrl+Alt+Del steal the key-release
+    // events that would otherwise balance every keyDown. Without this, the
+    // agent's KMBox holds the modifier state indefinitely — the symptom users
+    // hit was "double-click a folder → Properties opens instead of the
+    // folder" because Alt was silently stuck. Flush everything we still
+    // believe is down.
+    releaseHeldKeys();
+    QOpenGLWidget::focusOutEvent(e);
+}
+
+void VideoWidget::releaseHeldKeys() {
+    if (heldKeys_.empty()) return;
+    for (const std::uint16_t vk : heldKeys_) {
+        emit inputKey(vk, false);
+    }
+    heldKeys_.clear();
 }

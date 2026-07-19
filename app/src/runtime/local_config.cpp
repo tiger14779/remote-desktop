@@ -50,6 +50,8 @@ bool tryRead(const QString& path, LocalConfig* out) {
         out->kmboxUuid = obj.value("kmbox_uuid").toString();
     if (obj.contains("kmbox_enabled"))
         out->kmboxEnabled = obj.value("kmbox_enabled").toBool();
+    if (obj.contains("force_tcp_video"))
+        out->forceTcpVideo = obj.value("force_tcp_video").toBool();
 
     // Reject pre-existing IDs that aren't the current 8-digit format so the
     // upgrade silently re-rolls. Old 5-digit and 9-digit IDs both get
@@ -71,6 +73,7 @@ void SaveLocalConfig(const LocalConfig& cfg) {
     obj["kmbox_port"]    = int(cfg.kmboxPort);
     obj["kmbox_uuid"]    = cfg.kmboxUuid;
     obj["kmbox_enabled"] = cfg.kmboxEnabled;
+    obj["force_tcp_video"] = cfg.forceTcpVideo;
     QFile f(configFilePath());
     if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         f.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));

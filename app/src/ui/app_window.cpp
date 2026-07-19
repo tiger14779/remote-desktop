@@ -5,6 +5,8 @@
 #include "runtime/log_sink.h"
 #include "runtime/permission.h"
 
+#include "net/net_prefs.h"
+
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -752,6 +754,14 @@ AppMainWindow::AppMainWindow(const LocalConfig& localCfg, QWidget* parent)
 
     appendLog(QStringLiteral("app started — local id=%1").arg(local_.deviceId));
     refreshRecentList();
+    // Seed the shared force-TCP flag from persisted config BEFORE agent
+    // starts — otherwise the first UDP_INFO round-trip on session start
+    // wouldn't see it.
+    net_prefs::SetForceTcpVideo(local_.forceTcpVideo);
+    if (local_.forceTcpVideo) {
+        appendLog(QStringLiteral(
+            "[net] 强制 TCP 视频路径已启用 (调试用) — 若网络恢复请在托盘菜单关闭"));
+    }
     agent_.start(rcfg);
 
     setupTrayIcon();
@@ -792,6 +802,32 @@ void AppMainWindow::setupTrayIcon() {
     auto* showAct = trayMenu_->addAction(QStringLiteral("显示主窗口"));
     connect(showAct, &QAction::triggered, this, [this]() {
         activateFromBackground();
+    });
+    trayMenu_->addSeparator();
+    // Diagnostic toggle. Common failure mode: customer's UDP path drops
+    // fragmented IDR packets → viewer black screen. Flipping this to ON
+    // proves whether the problem is UDP-specific (video appears immediately
+    // over TCP) vs a real code bug (still black). Only takes effect on the
+    // next session, not the currently active one.
+    auto* forceTcpAct = trayMenu_->addAction(QStringLiteral("强制 TCP 视频 (调试)"));
+    forceTcpAct->setCheckable(true);
+    forceTcpAct->setChecked(local_.forceTcpVideo);
+    connect(forceTcpAct, &QAction::toggled, this, [this](bool on) {
+        net_prefs::SetForceTcpVideo(on);
+        local_.forceTcpVideo = on;
+        SaveLocalConfig(local_);
+        appendLog(on ? QStringLiteral(
+                           "[net] 强制 TCP 视频: 开 — 下次会话自动切窄带宽档 "
+                           "(15fps / 1.5Mbps / 720p),需断开重连才生效")
+                     : QStringLiteral(
+                           "[net] 强制 TCP 视频: 关 — 下次会话恢复 UDP 与全档"));
+        if (tray_) {
+            tray_->showMessage(
+                QStringLiteral("Remote Desktop"),
+                on ? QStringLiteral("已切到 TCP + 窄带宽档,请断开重连生效")
+                   : QStringLiteral("已恢复 UDP 高帧率档,请断开重连生效"),
+                QSystemTrayIcon::Information, 3000);
+        }
     });
     trayMenu_->addSeparator();
     auto* quitAct = trayMenu_->addAction(QStringLiteral("退出"));

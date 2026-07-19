@@ -56,6 +56,12 @@ public:
     using DirectUpFn = std::function<void(const std::string& peerHost,
                                            int peerPort)>;
 
+    // Fired on the recv thread when frame loss is detected: either a frame id
+    // gap at delivery time (frames skipped) or a half-assembled frame timing
+    // out. Rate-limited internally (~4/s max) so a lossy burst doesn't turn
+    // into a callback storm. Viewer wires this to a REQUEST_IDR send.
+    using FrameLossFn = std::function<void()>;
+
     VideoUdpXport();
     ~VideoUdpXport();
 
@@ -81,6 +87,10 @@ public:
     // proves the direct path is up. GUI code can queue-connect to log
     // "🟢 Direct" instead of "🟡 Relay".
     void SetDirectUpCallback(DirectUpFn cb) { directCb_ = std::move(cb); }
+
+    // Optional. Must be set before StartReceiver (read on the recv thread
+    // without locking).
+    void SetFrameLossCallback(FrameLossFn cb) { lossCb_ = std::move(cb); }
 
     // Reports whether the direct (P2P) path is currently in use for
     // outbound sends. Used by diagnostics.
@@ -139,6 +149,7 @@ private:
 
     FrameReadyFn frameCb_;
     DirectUpFn   directCb_;
+    FrameLossFn  lossCb_;
     std::thread  recvThread_;
     std::atomic<bool> shouldExit_{false};
 

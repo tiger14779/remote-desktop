@@ -5,7 +5,9 @@
 #include <wrl/client.h>
 
 #include <cstring>
+#include <iostream>
 #include <sstream>
+#include <string>
 
 using Microsoft::WRL::ComPtr;
 
@@ -139,63 +141,141 @@ DxgiCapturer::~DxgiCapturer() {
 }
 
 bool DxgiCapturer::Init(std::string* errorOut) {
-    if (!createDevice(errorOut)) return false;
-    if (!createDuplication(errorOut)) return false;
-    return true;
+    // Combined path: for each adapter (integrated + discrete on a hybrid
+    // laptop, single dGPU on desktops), create a D3D11 device tied to
+    // THAT adapter, then try DuplicateOutput on each of its outputs. Pick
+    // the first (device, output) pair that succeeds.
+    //
+    // Motivation: D3D11CreateDevice(nullptr) picks whatever adapter the
+    // driver decides is "best" — typically the discrete GPU on Optimus
+    // laptops. But the physical monitor is often plugged into the iGPU's
+    // outputs, so DuplicateOutput on the dGPU's device against the iGPU's
+    // output returns E_INVALIDARG (0x80070057, "specified device is not
+    // the same device that was used to create the output resource"). The
+    // fix is to walk everything and pair a device with an output on the
+    // SAME adapter.
+    return createAndDuplicate(errorOut);
 }
 
 bool DxgiCapturer::createDevice(std::string* errorOut) {
+    // Kept as a fallback / for callers who only need the D3D11 device.
+    return createAndDuplicate(errorOut);
+}
+
+bool DxgiCapturer::createDuplication(std::string* /*errorOut*/) {
+    // Consolidated into createAndDuplicate. This entry point stays for
+    // backward compat with older callers; a null impl just means "already
+    // handled by Init()".
+    return impl_->duplication != nullptr;
+}
+
+bool DxgiCapturer::createAndDuplicate(std::string* errorOut) {
+    // Start from a clean slate. Critical for DEVICE_REMOVED (0x887a0005,
+    // driver reset/TDR) recovery:
+    //   (a) the old duplication must be RELEASED before DuplicateOutput —
+    //       DXGI allows one duplication per output, so a live stale one
+    //       makes every re-init fail (E_ACCESSDENIED) forever;
+    //   (b) staging/gpuPool belong to the old device. ensureStaging reuses
+    //       them on size match, CopyResource across devices is a silent
+    //       no-op (returns void), and Map on the dead device's texture
+    //       returns DEVICE_REMOVED — an infinite "reinit" loop that never
+    //       actually recovers.
+    if (impl_->frameHeld && impl_->duplication) {
+        impl_->duplication->ReleaseFrame();
+        impl_->frameHeld = false;
+    }
+    impl_->duplication.Reset();
+    impl_->staging.Reset();
+    impl_->gpuPool.Reset();
+    impl_->gpuPoolW = 0;
+    impl_->gpuPoolH = 0;
+    impl_->context.Reset();
+    impl_->device.Reset();
+
     static const D3D_FEATURE_LEVEL levels[] = {
         D3D_FEATURE_LEVEL_11_1,
         D3D_FEATURE_LEVEL_11_0,
         D3D_FEATURE_LEVEL_10_1,
     };
-    D3D_FEATURE_LEVEL got;
-    HRESULT hr = D3D11CreateDevice(
-        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-        0, levels, static_cast<UINT>(std::size(levels)),
-        D3D11_SDK_VERSION,
-        impl_->device.GetAddressOf(), &got,
-        impl_->context.GetAddressOf());
-    if (FAILED(hr)) {
-        if (errorOut) *errorOut = hresultMsg("D3D11CreateDevice", hr);
-        return false;
-    }
-    return true;
-}
+    // BGRA_SUPPORT is required for Desktop Duplication on some driver
+    // versions (Intel iGPU in particular); harmless everywhere else.
+    const UINT deviceFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
 
-bool DxgiCapturer::createDuplication(std::string* errorOut) {
-    ComPtr<IDXGIDevice> dxgiDev;
-    HRESULT hr = impl_->device.As(&dxgiDev);
+    ComPtr<IDXGIFactory1> factory;
+    HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
     if (FAILED(hr)) {
-        if (errorOut) *errorOut = hresultMsg("QI IDXGIDevice", hr);
+        if (errorOut) *errorOut = hresultMsg("CreateDXGIFactory1", hr);
         return false;
     }
-    ComPtr<IDXGIAdapter> adapter;
-    hr = dxgiDev->GetAdapter(adapter.GetAddressOf());
-    if (FAILED(hr)) {
-        if (errorOut) *errorOut = hresultMsg("GetAdapter", hr);
-        return false;
+
+    std::string lastErr = "no adapter/output pair produced a working DuplicateOutput";
+    for (UINT ai = 0; ; ++ai) {
+        ComPtr<IDXGIAdapter1> adapter;
+        if (factory->EnumAdapters1(ai, adapter.GetAddressOf()) == DXGI_ERROR_NOT_FOUND) {
+            break;
+        }
+        DXGI_ADAPTER_DESC1 adesc{};
+        adapter->GetDesc1(&adesc);
+        // Software (WARP) adapter — skip; DuplicateOutput on WARP works
+        // but produces a black frame in most Windows configs.
+        if (adesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
+
+        // Create a D3D11 device pinned to THIS adapter.
+        ComPtr<ID3D11Device> device;
+        ComPtr<ID3D11DeviceContext> context;
+        D3D_FEATURE_LEVEL got;
+        hr = D3D11CreateDevice(
+            adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+            deviceFlags, levels, static_cast<UINT>(std::size(levels)),
+            D3D11_SDK_VERSION,
+            device.GetAddressOf(), &got, context.GetAddressOf());
+        if (FAILED(hr)) {
+            const std::string ctx = "D3D11CreateDevice(adapter#" +
+                                    std::to_string(ai) + ")";
+            lastErr = hresultMsg(ctx.c_str(), hr);
+            continue;
+        }
+
+        // Walk this adapter's outputs, try DuplicateOutput on each.
+        for (UINT oi = 0; ; ++oi) {
+            ComPtr<IDXGIOutput> output;
+            if (adapter->EnumOutputs(oi, output.GetAddressOf())
+                == DXGI_ERROR_NOT_FOUND) {
+                break;
+            }
+            DXGI_OUTPUT_DESC odesc{};
+            output->GetDesc(&odesc);
+            // Only care about outputs that are actually attached to the
+            // desktop — a headless dGPU on a laptop won't have any.
+            if (!odesc.AttachedToDesktop) continue;
+
+            ComPtr<IDXGIOutput1> output1;
+            if (FAILED(output.As(&output1))) continue;
+
+            ComPtr<IDXGIOutputDuplication> dup;
+            hr = output1->DuplicateOutput(device.Get(), dup.GetAddressOf());
+            if (SUCCEEDED(hr)) {
+                impl_->device      = std::move(device);
+                impl_->context     = std::move(context);
+                impl_->duplication = std::move(dup);
+                impl_->outputDesc  = odesc;
+                std::cerr << "[dxgi] capture bound to adapter#" << ai
+                          << " output#" << oi
+                          << " (" << odesc.DesktopCoordinates.right -
+                                     odesc.DesktopCoordinates.left
+                          << "x" << odesc.DesktopCoordinates.bottom -
+                                     odesc.DesktopCoordinates.top << ")\n";
+                return true;
+            }
+            const std::string ctx = "DuplicateOutput(adapter#" +
+                                    std::to_string(ai) + " output#" +
+                                    std::to_string(oi) + ")";
+            lastErr = hresultMsg(ctx.c_str(), hr);
+        }
     }
-    ComPtr<IDXGIOutput> output;
-    hr = adapter->EnumOutputs(0, output.GetAddressOf());
-    if (FAILED(hr)) {
-        if (errorOut) *errorOut = hresultMsg("EnumOutputs(0)", hr);
-        return false;
-    }
-    output->GetDesc(&impl_->outputDesc);
-    ComPtr<IDXGIOutput1> output1;
-    hr = output.As(&output1);
-    if (FAILED(hr)) {
-        if (errorOut) *errorOut = hresultMsg("QI IDXGIOutput1", hr);
-        return false;
-    }
-    hr = output1->DuplicateOutput(impl_->device.Get(), impl_->duplication.GetAddressOf());
-    if (FAILED(hr)) {
-        if (errorOut) *errorOut = hresultMsg("DuplicateOutput", hr);
-        return false;
-    }
-    return true;
+
+    if (errorOut) *errorOut = lastErr;
+    return false;
 }
 
 bool DxgiCapturer::ensureStaging(int width, int height, std::string* errorOut) {

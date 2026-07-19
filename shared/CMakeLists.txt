@@ -7,6 +7,7 @@ cmake_minimum_required(VERSION 3.20)
 add_library(shared_net STATIC
     net/tcp_client.cpp
     net/frame.cpp
+    net/net_prefs.cpp
     udp/udp_socket.cpp
     udp/video_xport.cpp
     udp/lan_ips.cpp

@@ -26,6 +26,40 @@ std::string wsaErr(const char* what, int err) {
     return ss.str();
 }
 
+// Fill sin_addr from either a numeric IPv4 string ("38.55.192.55") OR a
+// hostname ("yuancheng.skopn.co"). inet_pton alone only handles the first;
+// we hit "inet_pton failed for <domain>" the moment the relay reported a
+// domain-name UDP endpoint. getaddrinfo covers both cases, and its cache
+// (Windows resolver) means the per-call overhead on a hot-loop sendto is
+// microseconds after the first lookup.
+//
+// Returns true on success. On failure, err is populated with a human-
+// readable reason and sin_addr is left untouched.
+bool resolveIPv4(const std::string& hostOrIp, in_addr* out,
+                 std::string* err) {
+    if (hostOrIp.empty()) {
+        if (err) *err = "empty host";
+        return false;
+    }
+    // Fast path — already a numeric IP.
+    if (inet_pton(AF_INET, hostOrIp.c_str(), out) == 1) return true;
+
+    addrinfo hints{};
+    hints.ai_family   = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    addrinfo* res = nullptr;
+    const int rc = getaddrinfo(hostOrIp.c_str(), nullptr, &hints, &res);
+    if (rc != 0 || !res) {
+        if (err) *err = "getaddrinfo failed for " + hostOrIp +
+                         " (rc=" + std::to_string(rc) + ")";
+        if (res) freeaddrinfo(res);
+        return false;
+    }
+    *out = reinterpret_cast<sockaddr_in*>(res->ai_addr)->sin_addr;
+    freeaddrinfo(res);
+    return true;
+}
+
 } // namespace
 
 UdpSocket::UdpSocket() : sock_(kInvalid) {
@@ -58,8 +92,9 @@ bool UdpSocket::Bind(const std::string& localHost, int localPort,
     if (localHost.empty() || localHost == "0.0.0.0") {
         addr.sin_addr.s_addr = htonl(INADDR_ANY);
     } else {
-        if (inet_pton(AF_INET, localHost.c_str(), &addr.sin_addr) != 1) {
-            if (errorOut) *errorOut = "inet_pton failed for " + localHost;
+        std::string rerr;
+        if (!resolveIPv4(localHost, &addr.sin_addr, &rerr)) {
+            if (errorOut) *errorOut = rerr;
             closesocket(s);
             return false;
         }
@@ -103,8 +138,9 @@ bool UdpSocket::SendTo(const Endpoint& dst,
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(static_cast<u_short>(dst.port));
-    if (inet_pton(AF_INET, dst.host.c_str(), &addr.sin_addr) != 1) {
-        if (errorOut) *errorOut = "inet_pton failed for " + dst.host;
+    std::string rerr;
+    if (!resolveIPv4(dst.host, &addr.sin_addr, &rerr)) {
+        if (errorOut) *errorOut = rerr;
         return false;
     }
     const int sent = sendto(static_cast<SOCKET>(sock_),
@@ -160,7 +196,12 @@ int UdpSocket::RecvFrom(std::uint8_t* buf, std::size_t bufSize,
 
 void UdpSocket::Close() {
     if (sock_ != kInvalid) {
-        closesocket(static_cast<SOCKET>(sock_));
+        // shutdown before closesocket for the same reason as TcpClient::Close:
+        // some LSPs leave a blocked recvfrom parked when the socket is closed
+        // out from under it. shutdown gives us a documented wakeup path.
+        const SOCKET s = static_cast<SOCKET>(sock_);
+        ::shutdown(s, SD_BOTH);
+        ::closesocket(s);
         sock_ = kInvalid;
     }
 }

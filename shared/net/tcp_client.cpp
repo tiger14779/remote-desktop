@@ -86,7 +86,18 @@ bool TcpClient::Connect(const std::string& host, int port, std::string* errorOut
 
 void TcpClient::Close() {
     if (sock_ != kInvalid) {
-        closesocket(static_cast<SOCKET>(sock_));
+        // shutdown BEFORE closesocket. Windows' closesocket does not reliably
+        // wake a blocked recv/send on the same socket when a peer LSP (AV /
+        // corporate VPN / carrier proxy) sits above WSPRecv — the reader
+        // thread stays parked and the caller (~MainWindow's workerThread_.
+        // wait()) hangs indefinitely. shutdown(SD_BOTH) is a first-class
+        // wakeup: it fails any in-flight I/O with WSAESHUTDOWN, which is
+        // exactly the "connection closed" signal ReadFrame already treats
+        // as end-of-run. Ignore its return value — if the socket is already
+        // half-closed by the peer we still want the closesocket to happen.
+        const SOCKET s = static_cast<SOCKET>(sock_);
+        ::shutdown(s, SD_BOTH);
+        ::closesocket(s);
         sock_ = kInvalid;
     }
 }

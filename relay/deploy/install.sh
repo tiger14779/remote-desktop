@@ -34,48 +34,70 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELAY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-if [ ! -f "$RELAY_DIR/go.mod" ]; then
-    echo "error: expected $RELAY_DIR/go.mod — run from a relay/ checkout" >&2
-    exit 1
-fi
-
-# ---- Ensure Go >= 1.22 ----------------------------------------------------
-need_go=true
-if command -v go >/dev/null 2>&1; then
-    cur="$(go env GOVERSION 2>/dev/null | sed 's/^go//' || true)"
-    # sort -V puts the smaller value first. If "1.22" comes first, cur >= 1.22.
-    if [ -n "$cur" ] && [ "$(printf '1.22\n%s\n' "$cur" | sort -V | head -1)" = "1.22" ]; then
-        echo "==> Using existing Go: go$cur"
-        need_go=false
-    else
-        echo "==> Existing Go is go${cur:-unknown}, need >= 1.22 — replacing"
+# Two operating modes:
+#   (A) Pre-built tarball: SCRIPT_DIR/relay-linux exists (produced by
+#       release.bat's Go cross-compile). We skip Go install + build.
+#   (B) Source checkout: SCRIPT_DIR/../go.mod exists. Install Go if
+#       needed and build from source.
+PREBUILT="$SCRIPT_DIR/relay-linux"
+if [ -f "$PREBUILT" ]; then
+    # Tar from Windows loses the +x bit — chmod defensively rather than
+    # bailing out. Also check size to catch a partial upload.
+    if [ ! -s "$PREBUILT" ]; then
+        echo "error: $PREBUILT is empty (partial upload?)" >&2
+        exit 1
     fi
-fi
+    chmod +x "$PREBUILT"
+    echo "==> Using pre-built binary next to install.sh: $PREBUILT"
+    RELAY_BINARY="$PREBUILT"
+else
+    if [ ! -f "$RELAY_DIR/go.mod" ]; then
+        echo "error: no pre-built relay-linux and no source (go.mod) found" >&2
+        echo "       looked at: $PREBUILT" >&2
+        echo "       looked at: $RELAY_DIR/go.mod" >&2
+        exit 1
+    fi
 
-if $need_go; then
-    apt-get update -y
-    apt-get install -y --no-install-recommends ca-certificates wget tar
-    arch="$(dpkg --print-architecture)"
-    case "$arch" in
-        amd64) gotar="go${GO_VERSION}.linux-amd64.tar.gz" ;;
-        arm64) gotar="go${GO_VERSION}.linux-arm64.tar.gz" ;;
-        *) echo "unsupported architecture: $arch" >&2; exit 1 ;;
-    esac
-    echo "==> Downloading $gotar..."
-    wget -q --show-progress "https://go.dev/dl/$gotar" -O "/tmp/$gotar"
-    rm -rf /usr/local/go
-    tar -C /usr/local -xzf "/tmp/$gotar"
-    rm "/tmp/$gotar"
-    ln -sf /usr/local/go/bin/go /usr/local/bin/go
-    /usr/local/go/bin/go version
-fi
+    # ---- Ensure Go >= 1.22 --------------------------------------------
+    need_go=true
+    if command -v go >/dev/null 2>&1; then
+        cur="$(go env GOVERSION 2>/dev/null | sed 's/^go//' || true)"
+        # sort -V puts the smaller value first. If "1.22" comes first,
+        # cur >= 1.22.
+        if [ -n "$cur" ] && [ "$(printf '1.22\n%s\n' "$cur" | sort -V | head -1)" = "1.22" ]; then
+            echo "==> Using existing Go: go$cur"
+            need_go=false
+        else
+            echo "==> Existing Go is go${cur:-unknown}, need >= 1.22 — replacing"
+        fi
+    fi
 
-# ---- Build ----------------------------------------------------------------
-echo "==> Building relay..."
-cd "$RELAY_DIR"
-mkdir -p build
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o build/relay-linux ./cmd/relay
-ls -lh build/relay-linux
+    if $need_go; then
+        apt-get update -y
+        apt-get install -y --no-install-recommends ca-certificates wget tar
+        arch="$(dpkg --print-architecture)"
+        case "$arch" in
+            amd64) gotar="go${GO_VERSION}.linux-amd64.tar.gz" ;;
+            arm64) gotar="go${GO_VERSION}.linux-arm64.tar.gz" ;;
+            *) echo "unsupported architecture: $arch" >&2; exit 1 ;;
+        esac
+        echo "==> Downloading $gotar..."
+        wget -q --show-progress "https://go.dev/dl/$gotar" -O "/tmp/$gotar"
+        rm -rf /usr/local/go
+        tar -C /usr/local -xzf "/tmp/$gotar"
+        rm "/tmp/$gotar"
+        ln -sf /usr/local/go/bin/go /usr/local/bin/go
+        /usr/local/go/bin/go version
+    fi
+
+    # ---- Build --------------------------------------------------------
+    echo "==> Building relay from source..."
+    cd "$RELAY_DIR"
+    mkdir -p build
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o build/relay-linux ./cmd/relay
+    ls -lh build/relay-linux
+    RELAY_BINARY="$RELAY_DIR/build/relay-linux"
+fi
 
 # ---- User -----------------------------------------------------------------
 if ! id -u relay >/dev/null 2>&1; then
@@ -86,8 +108,16 @@ fi
 # ---- Install files --------------------------------------------------------
 echo "==> Installing to $INSTALL_DIR..."
 mkdir -p "$INSTALL_DIR"
-install -m 755 -o relay -g relay build/relay-linux        "$INSTALL_DIR/relay"
-install -m 644 -o relay -g relay config.example.json      "$INSTALL_DIR/config.example.json"
+install -m 755 -o relay -g relay "$RELAY_BINARY" "$INSTALL_DIR/relay"
+# config.example.json can be next to install.sh (prebuilt tarball case) OR
+# up one directory (source-tree case).
+if [ -f "$SCRIPT_DIR/config.example.json" ]; then
+    install -m 644 -o relay -g relay "$SCRIPT_DIR/config.example.json" \
+        "$INSTALL_DIR/config.example.json"
+elif [ -f "$RELAY_DIR/config.example.json" ]; then
+    install -m 644 -o relay -g relay "$RELAY_DIR/config.example.json" \
+        "$INSTALL_DIR/config.example.json"
+fi
 
 # ---- First-install config -------------------------------------------------
 # Resolution order:
@@ -142,7 +172,7 @@ fi
 
 # ---- systemd unit ---------------------------------------------------------
 UNIT_FILE="/etc/systemd/system/$SERVICE_NAME.service"
-sed -e "s|^ExecStart=.*|ExecStart=$INSTALL_DIR/relay -listen $LISTEN_ADDR -config $INSTALL_DIR/config.json|" \
+sed -e "s|^ExecStart=.*|ExecStart=$INSTALL_DIR/relay -listen $LISTEN_ADDR -config $INSTALL_DIR/config.json -quiet|" \
     -e "s|^WorkingDirectory=.*|WorkingDirectory=$INSTALL_DIR|" \
     "$SCRIPT_DIR/remote_desktop_relay.service" > "$UNIT_FILE"
 chmod 644 "$UNIT_FILE"
